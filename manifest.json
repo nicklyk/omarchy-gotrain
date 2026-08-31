@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "id": "nl.gotrain",
+  "name": "GoTrain",
+  "version": "1.0.0",
+  "author": "Nikolaos Lykouresis",
+  "license": "MIT",
+  "description": "Workout tracking synced from the GoTrain PWA",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "GoTrain",
+    "description": "Days since your last workout, with a popup of recent sessions",
+    "category": "Info",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "staleDays": 3,
+      "showDays": true
+    },
+    "schema": [
+      {
+        "key": "staleDays",
+        "type": "integer",
+        "label": "Nudge after",
+        "description": "Days without a workout before the pill turns urgent",
+        "defaultValue": 3,
+        "min": 1,
+        "max": 30,
+        "step": 1
+      },
+      {
+        "key": "showDays",
+        "type": "string",
+        "label": "Show day count",
+        "description": "Set to false for an icon-only pill",
+        "defaultValue": "true"
+      }
+    ]
+  }
+}

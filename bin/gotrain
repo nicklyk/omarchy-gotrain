@@ -188,7 +188,7 @@ def have(cmd: str) -> bool:
 def notify(headline: str, body: str = ""):
     if not have("omarchy-notification-send"):
         return
-    args = ["omarchy-notification-send", "-g", "\U000f02cb", headline]
+    args = ["omarchy-notification-send", "-g", "\U000f115d", headline]  # nf-md-weight-lifter
     if body:
         args.append(body)
     subprocess.run(args, check=False, capture_output=True)
@@ -639,6 +639,47 @@ def cmd_status(args, cfg, db):
     return 0
 
 
+def cmd_panel(args, cfg, db):
+    """Everything the bar popup renders, in one process call."""
+    out = compute_status(db, cfg)
+
+    out["recent"] = [
+        {
+            "id": w["id"],
+            "ts": w["ts"],
+            "plan": w["plan"],
+            "done": w["done_exercises"],
+            "total": w["total_exercises"],
+            "sets": w["total_sets"],
+        }
+        for w in db.execute(
+            "SELECT * FROM workouts ORDER BY (ts IS NULL), ts DESC, first_seen DESC "
+            "LIMIT ?", (args.number,)
+        )
+    ]
+
+    # Completed sets per muscle over the trailing 8 weeks -- recent enough to
+    # say something about current training, long enough to be stable.
+    since = (datetime.now() - timedelta(weeks=8)).date().isoformat()
+    out["muscles"] = [
+        {"muscle": r["muscle"] or "?", "sets": r["s"]}
+        for r in db.execute(
+            "SELECT e.muscle AS muscle, SUM(COALESCE(e.sets_completed, 0)) AS s "
+            "FROM workout_exercises e JOIN workouts w ON w.id = e.workout_id "
+            "WHERE e.done = 1 AND w.ts IS NOT NULL AND date(w.ts) >= ? "
+            "GROUP BY e.muscle ORDER BY s DESC LIMIT 8",
+            (since,),
+        )
+        if r["s"]
+    ]
+
+    out["watchDirs"] = [str(Path(d).expanduser()) for d in cfg["watchDirs"]]
+    out["pending"] = len(find_exports(cfg))
+    out["appUrl"] = cfg["appUrl"]
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
 def cmd_list(args, cfg, db):
     rows = db.execute(
         "SELECT * FROM workouts ORDER BY (ts IS NULL), ts DESC, first_seen DESC LIMIT ?",
@@ -993,6 +1034,10 @@ def main(argv=None):
     p = sub.add_parser("status", help="summary (the bar widget reads --json)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("panel", help="JSON for the bar popup (internal)")
+    p.add_argument("-n", "--number", type=int, default=8)
+    p.set_defaults(fn=cmd_panel)
 
     p = sub.add_parser("list", help="recent workouts")
     p.add_argument("-n", "--number", type=int, default=15)
