@@ -145,6 +145,10 @@ def now_iso() -> str:
 
 def die(msg: str, code: int = 1):
     print(f"{APP}: {msg}", file=sys.stderr)
+    # Launched from the bar panel there is no terminal to read stderr in, so
+    # the failure has to surface as a notification or it is simply invisible.
+    if not sys.stderr.isatty():
+        notify("GoTrain", msg.splitlines()[0])
     raise SystemExit(code)
 
 
