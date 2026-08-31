@@ -1,0 +1,1028 @@
+#!/usr/bin/env python3
+"""gotrain -- pull GoTrain workout data onto this machine and keep it.
+
+GoTrain (https://niclick.org/GoTrain) is a backend-less PWA: everything it
+knows lives in one browser localStorage key, `tp4_state`, on whichever device
+recorded it. This tool is the desktop half -- it ingests exported state,
+merges it into a local archive that outlives any phone-side reset, and answers
+the questions the Omarchy bar widget asks.
+
+Standard library only, by design: it ships inside an Omarchy plugin directory
+and must run with nothing installed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import gzip
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import shutil
+import socket
+import socketserver
+import sqlite3
+import subprocess
+import sys
+import threading
+import urllib.parse
+from datetime import datetime, timedelta, timezone
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+APP = "gotrain"
+DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / APP
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP
+DB_PATH = DATA_DIR / "gotrain.db"
+SNAPSHOT_DIR = DATA_DIR / "snapshots"
+CONFIG_PATH = CONFIG_DIR / "config.json"
+
+WIDGET_IPC_TARGET = "nl.gotrain"
+
+DEFAULT_CONFIG = {
+    # Where `gotrain sync` looks for exports dropped by LocalSend or a browser.
+    "watchDirs": ["~/Downloads"],
+    "watchGlobs": [
+        "*export*.json",
+        "gotrain*.json",
+        "trainingsplan*.json",
+        "workout_plan*.json",
+    ],
+    "port": 8765,
+    # Ceiling on the base64url payload a phone may put in a `GET /recv` URL.
+    # http.server hardcodes a 65536-byte request line, so stay clear of it.
+    "maxUrlPayload": 50000,
+    "pairTimeout": 120,
+    "staleDays": 3,
+    "origin": "https://niclick.org",
+    "appUrl": "https://niclick.org/GoTrain",
+}
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS snapshots (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  sha256        TEXT NOT NULL UNIQUE,
+  imported_at   TEXT NOT NULL,
+  source        TEXT NOT NULL,
+  path          TEXT,
+  kind          TEXT NOT NULL,
+  workouts_seen INTEGER NOT NULL DEFAULT 0,
+  workouts_new  INTEGER NOT NULL DEFAULT 0
+);
+
+-- `json` holds the entry verbatim (minus `exercises`) so `gotrain export` can
+-- round-trip losslessly. The broken-out columns exist for querying.
+CREATE TABLE IF NOT EXISTS workouts (
+  id              TEXT PRIMARY KEY,
+  ts              TEXT,
+  ts_source       TEXT NOT NULL DEFAULT 'none',
+  raw_date        TEXT,
+  raw_time        TEXT,
+  plan            TEXT,
+  plan_id         TEXT,
+  total_exercises INTEGER,
+  done_exercises  INTEGER,
+  total_sets      INTEGER,
+  json            TEXT NOT NULL DEFAULT '{}',
+  first_seen      TEXT NOT NULL,
+  snapshot_id     INTEGER REFERENCES snapshots(id)
+);
+CREATE INDEX IF NOT EXISTS idx_workouts_ts ON workouts(ts);
+
+-- reps/duration_min/kg are TEXT on purpose: GoTrain stores them as strings
+-- ('8-12', '5', ''), and coercing them to numbers would lose the ranges.
+CREATE TABLE IF NOT EXISTS workout_exercises (
+  workout_id     TEXT NOT NULL REFERENCES workouts(id) ON DELETE CASCADE,
+  idx            INTEGER NOT NULL,
+  ex_id          TEXT,
+  icon           TEXT,
+  name           TEXT,
+  muscle         TEXT,
+  type           TEXT,
+  sets           INTEGER,
+  reps           TEXT,
+  duration_min   TEXT,
+  kg             TEXT,
+  sets_completed INTEGER,
+  done           INTEGER,
+  json           TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY (workout_id, idx)
+);
+
+CREATE TABLE IF NOT EXISTS plans (
+  id         TEXT PRIMARY KEY,
+  name       TEXT,
+  json       TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS exercises (
+  id         TEXT PRIMARY KEY,
+  name       TEXT,
+  muscle     TEXT,
+  json       TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def die(msg: str, code: int = 1):
+    print(f"{APP}: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_config() -> dict:
+    cfg = dict(DEFAULT_CONFIG)
+    if CONFIG_PATH.exists():
+        try:
+            cfg.update(json.loads(CONFIG_PATH.read_text()))
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"{APP}: ignoring bad config {CONFIG_PATH}: {e}", file=sys.stderr)
+    return cfg
+
+
+def connect() -> sqlite3.Connection:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(DB_PATH)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys = ON")
+    db.executescript(SCHEMA)
+    return db
+
+
+def meta_get(db, key, default=None):
+    row = db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def meta_set(db, key, value):
+    db.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+
+def have(cmd: str) -> bool:
+    return shutil.which(cmd) is not None
+
+
+def notify(headline: str, body: str = ""):
+    if not have("omarchy-notification-send"):
+        return
+    args = ["omarchy-notification-send", "-g", "\U000f02cb", headline]
+    if body:
+        args.append(body)
+    subprocess.run(args, check=False, capture_output=True)
+
+
+def poke_widget():
+    """Ask the bar widget to re-read the DB. Best effort; the shell may be down."""
+    if not have("omarchy-shell"):
+        return
+    subprocess.run(
+        ["omarchy-shell", WIDGET_IPC_TARGET, "refresh"],
+        check=False, capture_output=True, timeout=5,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# timestamps
+#
+# GoTrain historically stored only localized display strings. Newer entries
+# carry an ISO `ts`; older ones must be recovered from `date`/`time`, whose
+# format depends on the app language at the time it was recorded.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DE_DATE = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$")
+_US_DATE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
+_ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def parse_legacy_datetime(date_s, time_s):
+    """Return (iso_string, 'locale') or (None, 'none')."""
+    if not date_s or not isinstance(date_s, str):
+        return None, "none"
+    d = date_s.strip()
+
+    ymd = None
+    if m := _DE_DATE.match(d):                      # 14.4.2026 -> d.m.Y
+        ymd = (int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    elif m := _US_DATE.match(d):                    # 4/14/2026 -> m/d/Y
+        ymd = (int(m.group(3)), int(m.group(1)), int(m.group(2)))
+    elif m := _ISO_DATE.match(d):
+        ymd = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    if not ymd:
+        return None, "none"
+
+    hh, mm = 0, 0
+    if isinstance(time_s, str) and time_s.strip():
+        t = time_s.strip().upper()
+        pm = t.endswith("PM")
+        am = t.endswith("AM")
+        t = t.replace("AM", "").replace("PM", "").strip()
+        if m := re.match(r"^(\d{1,2}):(\d{2})", t):
+            hh, mm = int(m.group(1)), int(m.group(2))
+            if pm and hh < 12:
+                hh += 12
+            if am and hh == 12:
+                hh = 0
+
+    try:
+        dt = datetime(ymd[0], ymd[1], ymd[2], hh, mm)
+    except ValueError:
+        return None, "none"
+    return dt.astimezone().isoformat(timespec="seconds"), "locale"
+
+
+def workout_timestamp(entry: dict):
+    ts = entry.get("ts")
+    if isinstance(ts, str) and ts.strip():
+        try:
+            datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            return ts, "iso"
+        except ValueError:
+            pass
+    return parse_legacy_datetime(entry.get("date"), entry.get("time"))
+
+
+def to_local(ts: str | None):
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt.astimezone()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ingest
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _num(v):
+    """Coerce to a number for counting columns; None when it isn't one."""
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, (int, float)):
+        return v
+    if isinstance(v, str):
+        try:
+            return int(v.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _text(v):
+    """Keep GoTrain's string-ish fields ('8-12', '', '5') exactly as given."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, (int, float)):
+        return str(v)
+    return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+
+
+def validate_state(state, kind: str):
+    """Mirror what GoTrain's own importData() insists on."""
+    if not isinstance(state, dict):
+        raise ValueError("not a JSON object")
+    if kind == "full":
+        if not state.get("plans") or not state.get("activePlanId"):
+            raise ValueError(
+                "missing 'plans'/'activePlanId' -- this does not look like a "
+                "GoTrain export"
+            )
+    if "history" in state and not isinstance(state["history"], list):
+        raise ValueError("'history' is not a list")
+
+
+def plan_hash(state: dict) -> str:
+    payload = json.dumps(
+        {"plans": state.get("plans", []), "globalExercises": state.get("globalExercises", [])},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def ingest(db, state: dict, *, source: str, kind: str = "full", raw: bytes | None = None):
+    """Merge one state blob. Returns a summary dict.
+
+    Workouts are keyed by GoTrain's own history id and inserted with
+    INSERT OR IGNORE, so a phone that prunes or resets its history can never
+    remove what this machine already recorded.
+    """
+    validate_state(state, kind)
+
+    if raw is None:
+        raw = json.dumps(state, ensure_ascii=False).encode()
+    digest = hashlib.sha256(raw).hexdigest()
+
+    existing = db.execute("SELECT id FROM snapshots WHERE sha256 = ?", (digest,)).fetchone()
+    if existing:
+        return {"duplicate": True, "new": 0, "seen": 0, "snapshot_id": existing["id"]}
+
+    stamp = now_iso()
+    snap_path = None
+    if kind == "full":
+        snap_path = SNAPSHOT_DIR / f"{stamp.replace(':', '')}-{digest[:8]}.json"
+        snap_path.write_bytes(raw)
+
+    cur = db.execute(
+        "INSERT INTO snapshots (sha256, imported_at, source, path, kind) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (digest, stamp, source, str(snap_path) if snap_path else None, kind),
+    )
+    snapshot_id = cur.lastrowid
+
+    history = state.get("history") or []
+    seen = len(history)
+    new = 0
+
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        wid = entry.get("id")
+        if wid is None:
+            continue
+        wid = str(wid)
+        ts, ts_source = workout_timestamp(entry)
+
+        row = db.execute(
+            "SELECT id, ts_source FROM workouts WHERE id = ?", (wid,)
+        ).fetchone()
+
+        if row:
+            # Upgrade a locale-derived timestamp once a real ISO one arrives.
+            if ts_source == "iso" and row["ts_source"] != "iso":
+                db.execute(
+                    "UPDATE workouts SET ts = ?, ts_source = ? WHERE id = ?",
+                    (ts, ts_source, wid),
+                )
+            continue
+
+        bare = {k: v for k, v in entry.items() if k != "exercises"}
+        db.execute(
+            "INSERT INTO workouts (id, ts, ts_source, raw_date, raw_time, plan, "
+            "plan_id, total_exercises, done_exercises, total_sets, json, "
+            "first_seen, snapshot_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                wid, ts, ts_source,
+                entry.get("date"), entry.get("time"),
+                entry.get("plan"), entry.get("planId"),
+                _num(entry.get("totalExercises")),
+                _num(entry.get("doneExercises")),
+                _num(entry.get("totalSets")),
+                json.dumps(bare, ensure_ascii=False),
+                stamp, snapshot_id,
+            ),
+        )
+        new += 1
+
+        for i, ex in enumerate(entry.get("exercises") or []):
+            if not isinstance(ex, dict):
+                continue
+            db.execute(
+                "INSERT OR REPLACE INTO workout_exercises (workout_id, idx, ex_id, "
+                "icon, name, muscle, type, sets, reps, duration_min, kg, "
+                "sets_completed, done, json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    wid, i, ex.get("id"), ex.get("icon"), ex.get("name"),
+                    ex.get("muscle"), ex.get("type"),
+                    _num(ex.get("sets")), _text(ex.get("reps")),
+                    _text(ex.get("durationMin")), _text(ex.get("kg")),
+                    _num(ex.get("setsCompleted")),
+                    1 if ex.get("done") else 0,
+                    json.dumps(ex, ensure_ascii=False),
+                ),
+            )
+
+    # The plan library is current-state, not history: replace it wholesale, but
+    # only from a full export -- a delta carries no library at all.
+    if kind == "full":
+        db.execute("DELETE FROM plans")
+        for p in state.get("plans") or []:
+            if isinstance(p, dict) and p.get("id"):
+                db.execute(
+                    "INSERT OR REPLACE INTO plans (id, name, json, updated_at) VALUES (?,?,?,?)",
+                    (str(p["id"]), p.get("name"),
+                     json.dumps(p, ensure_ascii=False), stamp),
+                )
+        db.execute("DELETE FROM exercises")
+        for e in state.get("globalExercises") or []:
+            if isinstance(e, dict) and e.get("id"):
+                db.execute(
+                    "INSERT OR REPLACE INTO exercises (id, name, muscle, json, updated_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (str(e["id"]), e.get("name"), e.get("muscle"),
+                     json.dumps(e, ensure_ascii=False), stamp),
+                )
+        meta_set(db, "plan_hash", plan_hash(state))
+        meta_set(db, "state_scalars", json.dumps({
+            "globalPauseSecs": state.get("globalPauseSecs", 75),
+            "lang": state.get("lang", "en"),
+            "activePlanId": state.get("activePlanId"),
+            "progress": state.get("progress", {}),
+        }, ensure_ascii=False))
+
+    db.execute(
+        "UPDATE snapshots SET workouts_seen = ?, workouts_new = ? WHERE id = ?",
+        (seen, new, snapshot_id),
+    )
+    refresh_cursor(db)
+    db.commit()
+    return {"duplicate": False, "new": new, "seen": seen, "snapshot_id": snapshot_id}
+
+
+def refresh_cursor(db):
+    row = db.execute("SELECT MAX(ts) AS m FROM workouts WHERE ts IS NOT NULL").fetchone()
+    meta_set(db, "cursor_ts", row["m"] or "")
+
+
+def read_state_bytes(raw: bytes):
+    """Accept gzip or plain JSON; return (state, canonical_raw_json_bytes)."""
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    text = raw.decode("utf-8-sig")
+    return json.loads(text), raw
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# reporting
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_status(db, cfg) -> dict:
+    total = db.execute("SELECT COUNT(*) AS c FROM workouts").fetchone()["c"]
+    last = db.execute(
+        "SELECT * FROM workouts WHERE ts IS NOT NULL ORDER BY ts DESC LIMIT 1"
+    ).fetchone()
+
+    out = {
+        "hasData": total > 0,
+        "totalWorkouts": total,
+        "daysSince": None,
+        "lastTs": None,
+        "lastPlan": None,
+        "weekCount": 0,
+        "stale": False,
+        "staleDays": cfg["staleDays"],
+        "lastImport": meta_get(db, "last_import"),
+    }
+    if not last:
+        return out
+
+    dt = to_local(last["ts"])
+    out["lastTs"] = last["ts"]
+    out["lastPlan"] = last["plan"]
+    if dt:
+        today = datetime.now(dt.tzinfo).date()
+        days = (today - dt.date()).days
+        out["daysSince"] = days
+        out["stale"] = days >= cfg["staleDays"]
+
+        monday = today - timedelta(days=today.weekday())
+        out["weekCount"] = db.execute(
+            "SELECT COUNT(*) AS c FROM workouts WHERE ts IS NOT NULL AND date(ts) >= ?",
+            (monday.isoformat(),),
+        ).fetchone()["c"]
+    return out
+
+
+def build_state(db) -> dict:
+    """Reconstruct a merged tp4_state, importable back into GoTrain."""
+    scalars = json.loads(meta_get(db, "state_scalars", "{}") or "{}")
+    plans = [json.loads(r["json"]) for r in db.execute("SELECT json FROM plans")]
+    exercises = [json.loads(r["json"]) for r in db.execute("SELECT json FROM exercises")]
+
+    history = []
+    rows = db.execute(
+        "SELECT * FROM workouts ORDER BY (ts IS NULL), ts DESC, first_seen DESC"
+    ).fetchall()
+    for w in rows:
+        exs = [
+            json.loads(e["json"])
+            for e in db.execute(
+                "SELECT json FROM workout_exercises WHERE workout_id = ? ORDER BY idx",
+                (w["id"],),
+            )
+        ]
+        entry = json.loads(w["json"] or "{}")
+        entry["id"] = w["id"]
+        entry["exercises"] = exs
+        if w["ts"] and "ts" not in entry:
+            entry["ts"] = w["ts"]
+        history.append(entry)
+
+    return {
+        "globalPauseSecs": scalars.get("globalPauseSecs", 75),
+        "lang": scalars.get("lang", "en"),
+        "activePlanId": scalars.get("activePlanId") or (plans[0]["id"] if plans else None),
+        "plans": plans,
+        "globalExercises": exercises,
+        "progress": scalars.get("progress", {}),
+        "history": history,
+    }
+
+
+def report_import(result, label):
+    if result["duplicate"]:
+        print(f"{label}: already imported, nothing to do")
+        return False
+    print(f"{label}: {result['new']} new of {result['seen']} workouts")
+    return True
+
+
+def after_import(db, cfg, results):
+    total_new = sum(r["new"] for r in results if not r["duplicate"])
+    meta_set(db, "last_import", now_iso())
+    db.commit()
+    if total_new:
+        notify("GoTrain", f"Imported {total_new} workout{'s' if total_new != 1 else ''}")
+    poke_widget()
+    return total_new
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+def cmd_import(args, cfg, db):
+    results = []
+    for p in args.files:
+        path = Path(p).expanduser()
+        if not path.is_file():
+            die(f"no such file: {path}")
+        try:
+            state, raw = read_state_bytes(path.read_bytes())
+            res = ingest(db, state, source=f"file:{path}", raw=raw)
+        except (ValueError, json.JSONDecodeError, OSError) as e:
+            die(f"{path.name}: {e}")
+        report_import(res, path.name)
+        results.append(res)
+    after_import(db, cfg, results)
+    return 0
+
+
+def find_exports(cfg):
+    hits = []
+    for d in cfg["watchDirs"]:
+        directory = Path(d).expanduser()
+        if not directory.is_dir():
+            continue
+        for pattern in cfg["watchGlobs"]:
+            hits.extend(p for p in directory.glob(pattern) if p.is_file())
+    return sorted(set(hits), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def cmd_sync(args, cfg, db):
+    found = find_exports(cfg)
+    if not found:
+        dirs = ", ".join(cfg["watchDirs"])
+        die(f"no GoTrain export found in {dirs}\n"
+            f"       send one from the phone (Settings -> Send to PC) or use "
+            f"`{APP} import <file>`")
+
+    targets = found if args.all else found[:1]
+    results = []
+    for path in targets:
+        try:
+            state, raw = read_state_bytes(path.read_bytes())
+            res = ingest(db, state, source=f"localsend:{path}", raw=raw)
+        except (ValueError, json.JSONDecodeError, OSError) as e:
+            print(f"{APP}: skipping {path.name}: {e}", file=sys.stderr)
+            continue
+        report_import(res, path.name)
+        results.append(res)
+    if not results:
+        die("nothing could be imported")
+    after_import(db, cfg, results)
+    return 0
+
+
+def cmd_status(args, cfg, db):
+    st = compute_status(db, cfg)
+    if args.json:
+        print(json.dumps(st, ensure_ascii=False))
+        return 0
+    if not st["hasData"]:
+        print("no workouts yet -- run `gotrain sync` after sending data from the phone")
+        return 0
+    d = st["daysSince"]
+    when = "today" if d == 0 else "yesterday" if d == 1 else f"{d} days ago"
+    print(f"last workout : {st['lastPlan'] or '?'} ({when})")
+    print(f"this week    : {st['weekCount']}")
+    print(f"total        : {st['totalWorkouts']}")
+    if st["lastImport"]:
+        print(f"last import  : {st['lastImport']}")
+    return 0
+
+
+def cmd_list(args, cfg, db):
+    rows = db.execute(
+        "SELECT * FROM workouts ORDER BY (ts IS NULL), ts DESC, first_seen DESC LIMIT ?",
+        (args.number,),
+    ).fetchall()
+    if not rows:
+        print("no workouts yet")
+        return 0
+    for w in rows:
+        dt = to_local(w["ts"])
+        when = dt.strftime("%Y-%m-%d %H:%M") if dt else (w["raw_date"] or "?")
+        done = f"{w['done_exercises']}/{w['total_exercises']}"
+        print(f"{when}  {done:>7}  {w['plan'] or '?'}   [{w['id']}]")
+    return 0
+
+
+def cmd_show(args, cfg, db):
+    w = db.execute("SELECT * FROM workouts WHERE id = ?", (args.id,)).fetchone()
+    if not w:
+        die(f"no workout with id {args.id}")
+    dt = to_local(w["ts"])
+    print(f"{w['plan'] or '?'} -- {dt.strftime('%Y-%m-%d %H:%M') if dt else w['raw_date']}")
+    print(f"{w['done_exercises']}/{w['total_exercises']} exercises, "
+          f"{w['total_sets']} sets\n")
+    for e in db.execute(
+        "SELECT * FROM workout_exercises WHERE workout_id = ? ORDER BY idx", (args.id,)
+    ):
+        mark = "x" if e["done"] else " "
+        if e["type"] == "time":
+            detail = f"{e['duration_min']} min"
+        else:
+            detail = f"{e['sets_completed'] or 0}/{e['sets'] or 0} sets x {e['reps'] or 0}"
+            if e["kg"]:
+                detail += f" @ {e['kg']} kg"
+        print(f"  [{mark}] {e['name'] or '?':<28} {detail}")
+    return 0
+
+
+def cmd_stats(args, cfg, db):
+    total = db.execute("SELECT COUNT(*) AS c FROM workouts").fetchone()["c"]
+    if not total:
+        print("no workouts yet")
+        return 0
+    print(f"workouts recorded : {total}")
+    span = db.execute(
+        "SELECT MIN(ts) AS a, MAX(ts) AS b FROM workouts WHERE ts IS NOT NULL"
+    ).fetchone()
+    if span["a"]:
+        print(f"first / last      : {span['a'][:10]} .. {span['b'][:10]}")
+    print("\nby muscle group (completed sets):")
+    for r in db.execute(
+        "SELECT muscle, SUM(COALESCE(sets_completed, 0)) AS s "
+        "FROM workout_exercises WHERE done = 1 GROUP BY muscle ORDER BY s DESC LIMIT 12"
+    ):
+        print(f"  {r['muscle'] or '?':<20} {r['s']}")
+    print("\nmost frequent exercises:")
+    for r in db.execute(
+        "SELECT name, COUNT(*) AS c FROM workout_exercises WHERE done = 1 "
+        "GROUP BY name ORDER BY c DESC LIMIT 10"
+    ):
+        print(f"  {r['name'] or '?':<28} {r['c']}x")
+    return 0
+
+
+def cmd_export(args, cfg, db):
+    state = build_state(db)
+    if not state["plans"]:
+        die("nothing to export -- no plan library imported yet")
+    text = json.dumps(state, indent=2, ensure_ascii=False)
+    if args.output:
+        out = Path(args.output).expanduser()
+        out.write_text(text)
+        print(f"wrote {out} ({len(state['history'])} workouts)")
+    else:
+        print(text)
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pair: one-shot LAN receiver
+# ─────────────────────────────────────────────────────────────────────────────
+
+def lan_ip() -> str:
+    """Best-guess outward-facing address. Sends nothing -- UDP connect only."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def print_qr(payload: str):
+    if have("qrencode"):
+        subprocess.run(["qrencode", "-t", "ANSIUTF8", "-m", "2", payload], check=False)
+    else:
+        print("(install qrencode to see a scannable code)")
+    print(f"\n  {payload}\n")
+
+
+DONE_PAGE = """<!doctype html><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>GoTrain</title>
+<style>
+ body{{font:16px/1.5 system-ui,sans-serif;margin:0;min-height:100vh;display:grid;
+      place-items:center;background:#111;color:#eee;text-align:center;padding:2rem}}
+ .c{{max-width:22rem}} .t{{font-size:3rem}} a{{color:#7cf}}
+</style>
+<div class=c><div class=t>{icon}</div><h1>{title}</h1><p>{body}</p>
+<p><a href="{app}">Back to GoTrain</a></p></div>
+"""
+
+
+class Receiver(BaseHTTPRequestHandler):
+    server_version = "gotrain/1.0"
+    # Set by the server factory below.
+    token = ""
+    cfg: dict = {}
+    result: dict = {}
+    finished: threading.Event
+
+    def log_message(self, fmt, *args):  # quieter than the default stderr spam
+        pass
+
+    # -- plumbing ----------------------------------------------------------
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", self.cfg["origin"])
+        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "content-type")
+        # Legacy Private Network Access; harmless, helps Chrome 104-141.
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Access-Control-Max-Age", "600")
+
+    def _send(self, code, body=b"", ctype="text/plain; charset=utf-8", extra=None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Gotrain", "1")
+        self._cors()
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def _page(self, code, icon, title, body):
+        html = DONE_PAGE.format(
+            icon=icon, title=title, body=body, app=self.cfg["appUrl"]
+        ).encode()
+        self._send(code, html, "text/html; charset=utf-8")
+
+    def _check_token(self, given: str) -> bool:
+        return hmac.compare_digest(given or "", self.token)
+
+    # -- routes ------------------------------------------------------------
+    def do_OPTIONS(self):
+        self._send(HTTPStatus.NO_CONTENT)
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/ping":
+            self._send(HTTPStatus.OK, b'{"ok":true,"app":"gotrain"}',
+                       "application/json")
+            return
+        if parsed.path == "/recv":
+            q = urllib.parse.parse_qs(parsed.query)
+            if not self._check_token(q.get("t", [""])[0]):
+                self._page(HTTPStatus.FORBIDDEN, "✕", "Wrong code",
+                           "That pairing code is not valid. Start "
+                           "<code>gotrain pair</code> again.")
+                return
+            data = q.get("d", [""])[0]
+            kind = q.get("c", ["full"])[0]
+            self._ingest_payload(data.encode(), kind, "pair:url", html=True)
+            return
+        self._send(HTTPStatus.NOT_FOUND, b"not found")
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if not parsed.path.startswith("/recv"):
+            self._send(HTTPStatus.NOT_FOUND, b"not found")
+            return
+        token = parsed.path[len("/recv/"):] if parsed.path.startswith("/recv/") else ""
+        if not token:
+            token = urllib.parse.parse_qs(parsed.query).get("t", [""])[0]
+        if not self._check_token(token):
+            self._send(HTTPStatus.FORBIDDEN, b'{"error":"bad token"}',
+                       "application/json")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 32 * 1024 * 1024:
+            self._send(HTTPStatus.BAD_REQUEST, b'{"error":"bad length"}',
+                       "application/json")
+            return
+        kind = urllib.parse.parse_qs(parsed.query).get("c", ["full"])[0]
+        self._ingest_payload(self.rfile.read(length), kind, "pair:post", html=False,
+                             already_binary=True)
+
+    # -- ingest ------------------------------------------------------------
+    def _ingest_payload(self, payload: bytes, kind: str, source: str,
+                        *, html: bool, already_binary: bool = False):
+        kind = "delta" if kind == "delta" else "full"
+        try:
+            raw = payload if already_binary else b64url_decode(payload)
+            state, raw = read_state_bytes(raw)
+        except Exception as e:                       # noqa: BLE001 - report anything
+            self._fail(html, f"Could not read the transfer ({e}).")
+            return
+
+        db = connect()
+        try:
+            res = ingest(db, state, source=source, kind=kind, raw=raw)
+            meta_set(db, "last_import", now_iso())
+            db.commit()
+        except ValueError as e:
+            self._fail(html, str(e))
+            db.close()
+            return
+        db.close()
+
+        self.result.update(res)
+        if html:
+            n = res["new"]
+            self._page(
+                HTTPStatus.OK, "✓", "Synced",
+                "Nothing new to add." if res["duplicate"] or not n
+                else f"{n} workout{'s' if n != 1 else ''} added on your PC.",
+            )
+        else:
+            self._send(HTTPStatus.OK,
+                       json.dumps({"ok": True, **res}).encode(), "application/json")
+        self.finished.set()
+
+    def _fail(self, html: bool, msg: str):
+        if html:
+            self._page(HTTPStatus.BAD_REQUEST, "✕", "Sync failed", msg)
+        else:
+            self._send(HTTPStatus.BAD_REQUEST,
+                       json.dumps({"ok": False, "error": msg}).encode(),
+                       "application/json")
+
+
+class PairServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer without the reverse-DNS stall.
+
+    HTTPServer.server_bind() calls socket.getfqdn(), which blocks for about
+    five seconds whenever the resolver can't answer -- five seconds of blank
+    terminal before the QR code appears. Nothing here reads server_name.
+    """
+
+    daemon_threads = True
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "gotrain"
+        self.server_port = self.server_address[1]
+
+
+def b64url_decode(data: bytes) -> bytes:
+    import base64
+    s = data.decode("ascii", "strict").strip()
+    s = urllib.parse.unquote(s)
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+
+def cmd_pair(args, cfg, db):
+    port = args.port or cfg["port"]
+    token = secrets.token_urlsafe(16)
+    ip = lan_ip()
+    cursor = meta_get(db, "cursor_ts", "") or ""
+    phash = meta_get(db, "plan_hash", "") or ""
+    db.close()
+
+    finished = threading.Event()
+
+    handler = type("BoundReceiver", (Receiver,), {
+        "token": token, "cfg": cfg, "result": {}, "finished": finished,
+    })
+
+    try:
+        httpd = PairServer(("0.0.0.0", port), handler)
+    except OSError as e:
+        die(f"cannot listen on port {port}: {e}")
+
+    payload = f"gotrain1:{ip}:{port}:{token}:{cursor}:{phash}"
+
+    print("Scan this from inside GoTrain (Settings -> Scan PC code):\n")
+    print_qr(payload)
+    if cursor:
+        print(f"Only workouts newer than {cursor[:16]} will be sent.")
+    else:
+        print("First sync: the phone will send everything.")
+    # Explicit flush: stdout is block-buffered when piped, and this command
+    # prints something to look at and then blocks.
+    print(f"Listening on http://{ip}:{port} -- Ctrl-C to stop.\n", flush=True)
+
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+
+    timeout = cfg["pairTimeout"]
+    try:
+        if not finished.wait(timeout):
+            print(f"Timed out after {timeout}s with no transfer.", file=sys.stderr)
+            httpd.shutdown()
+            return 1
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        httpd.shutdown()
+        return 130
+
+    httpd.shutdown()
+    res = handler.result
+    if res.get("duplicate"):
+        print("Already had that data -- nothing new.")
+    else:
+        n = res.get("new", 0)
+        print(f"Received {n} new workout{'s' if n != 1 else ''}.")
+        if n:
+            notify("GoTrain", f"Imported {n} workout{'s' if n != 1 else ''}")
+    poke_widget()
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog=APP, description="Sync GoTrain workout data to this machine.")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("sync", help="import the newest export from the watch folders")
+    p.add_argument("--all", action="store_true",
+                   help="import every matching export, not just the newest")
+    p.set_defaults(fn=cmd_sync)
+
+    p = sub.add_parser("import", help="import specific export file(s)")
+    p.add_argument("files", nargs="+")
+    p.set_defaults(fn=cmd_import)
+
+    p = sub.add_parser("pair", help="show a QR code and receive one transfer")
+    p.add_argument("--port", type=int)
+    p.set_defaults(fn=cmd_pair)
+
+    p = sub.add_parser("status", help="summary (the bar widget reads --json)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("list", help="recent workouts")
+    p.add_argument("-n", "--number", type=int, default=15)
+    p.set_defaults(fn=cmd_list)
+
+    p = sub.add_parser("show", help="one workout in detail")
+    p.add_argument("id")
+    p.set_defaults(fn=cmd_show)
+
+    p = sub.add_parser("stats", help="aggregate statistics")
+    p.set_defaults(fn=cmd_stats)
+
+    p = sub.add_parser("export", help="write a merged tp4_state for GoTrain to import")
+    p.add_argument("-o", "--output")
+    p.set_defaults(fn=cmd_export)
+
+    args = parser.parse_args(argv)
+    cfg = load_config()
+    db = connect()
+    try:
+        return args.fn(args, cfg, db)
+    finally:
+        try:
+            db.close()
+        except sqlite3.ProgrammingError:
+            pass
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)
