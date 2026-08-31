@@ -53,8 +53,11 @@ BarWidget {
     statusProc.running = true
   }
 
+  // shellQuote lives on the Util singleton, not on `bar` -- the bar README
+  // says `bar.shellQuote`, but Bar.qml has no such method and calling it
+  // throws before `run` is ever reached.
   function syncFromDrop() {
-    if (bar) bar.run(bar.shellQuote(cli) + " sync")
+    if (bar) bar.run(Util.shellQuote(cli) + " sync")
   }
 
   // ---- Popup plumbing. Bar.findPanelWidget requires open/close/opened on the

@@ -94,8 +94,11 @@ Panel {
     if (root.bar) root.bar.run(command)
   }
 
+  // shellQuote lives on the Util singleton, not on `bar` -- the bar README
+  // says `bar.shellQuote`, but Bar.qml has no such method and calling it
+  // throws before `run` is ever reached.
   function quotedCli() {
-    return root.bar ? root.bar.shellQuote(root.cli) : root.cli
+    return Util.shellQuote(root.cli)
   }
 
   // ---- Actions -------------------------------------------------------------
@@ -108,13 +111,13 @@ Panel {
   // `pair` prints a QR and blocks, so it needs somewhere visible to run.
   function pairPhone() {
     run("omarchy-launch-floating-terminal-with-presentation "
-        + root.bar.shellQuote(root.cli + " pair"))
+        + Util.shellQuote(root.cli + " pair"))
     close()
   }
 
   function openApp() {
     var url = data && data.appUrl ? data.appUrl : "https://niclick.org/GoTrain"
-    run("omarchy-launch-webapp " + root.bar.shellQuote(url))
+    run("omarchy-launch-webapp " + Util.shellQuote(url))
     close()
   }
 
