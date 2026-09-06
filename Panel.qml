@@ -29,6 +29,17 @@ Panel {
   property var data: null
   property string loadError: ""
 
+  property string activeTab: "overview"
+  readonly property var config: data && data.config ? data.config : null
+  // True while any field owns the keyboard, so PanelKeyCatcher stands down --
+  // it runs at Keys.BeforeItem and would otherwise eat every keystroke before
+  // the field saw it. NumberField exposes no activeFocus on its root, so go
+  // through its `field` alias to the spin box.
+  readonly property bool editing: watchField.activeFocus
+    || staleField.field.activeFocus
+    || portField.field.activeFocus
+    || timeoutField.field.activeFocus
+
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -46,6 +57,55 @@ Panel {
     var m = 0
     for (var i = 0; i < muscles.length; i++) m = Math.max(m, muscles[i].sets)
     return m
+  }
+
+  readonly property bool showDays: String(setting("showDays", false)) === "true"
+
+  function cfgValue(key, fallback) {
+    return config && config[key] ? config[key].value : fallback
+  }
+
+  function cfgLabel(key, fallback) {
+    return config && config[key] ? config[key].label : fallback
+  }
+
+  // shell.json write-through for presentation settings. updateEntryInline
+  // REPLACES the entry rather than merging, so the whole thing is rebuilt or
+  // other keys would be silently dropped. Applying locally first (and to the
+  // host widget) makes the pill change on the click and stops a stale copy
+  // being written straight back out. Mirrors clock/Panel.qml persistSettings.
+  function persistSettings(values) {
+    var entry = { id: root.moduleName }
+    for (var existing in root.settings) if (existing !== "id") entry[existing] = root.settings[existing]
+    for (var key in values) entry[key] = values[key]
+
+    root.settings = entry
+    if (root.hostWidget && "settings" in root.hostWidget) root.hostWidget.settings = entry
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
+      root.bar.shell.updateEntryInline(root.moduleName, entry)
+  }
+
+  // Behaviour settings live in the CLI config so a terminal `gotrain status`
+  // agrees with the pill. Written through the CLI, which owns validation.
+  function saveConfig(key, value) {
+    configProc.running = false
+    configProc.command = [root.cli, "config", "set", key, String(value)]
+    configProc.running = true
+  }
+
+  // NumberField leaves the SpinBox's default locale formatting in place, which
+  // renders a port as "8,765". Ports and second counts are plain integers, so
+  // strip the grouping separator through the `field` alias.
+  function plainDigits(spin) {
+    if (!spin) return
+    spin.locale = Qt.locale("C")
+    spin.textFromValue = function(value, locale) { return String(value) }
+    spin.valueFromText = function(text, locale) { return parseInt(text, 10) || 0 }
+  }
+
+  // Hand the keyboard back, or the catcher stays dead after the first edit.
+  function endEditing() {
+    Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
   }
 
   function setCenterHoverRevealSuppressed(value) {
@@ -82,6 +142,18 @@ Panel {
   function toggle() {
     if (root.opened) root.close()
     else root.openFromHotkey()
+  }
+
+  function toggleDays() {
+    root.persistSettings({ showDays: !root.showDays })
+  }
+
+  // Jump straight to one tab, for a keybinding or `omarchy-shell nl.gotrain
+  // settings`.
+  function openTab(tab) {
+    root.activeTab = tab === "settings" ? "settings" : "overview"
+    if (!root.opened) root.openFromHotkey()
+    else root.refresh()
   }
 
   function switchPanel(direction) {
@@ -176,6 +248,16 @@ Panel {
     }
   }
 
+  Process {
+    id: configProc
+    // Re-read after the write lands; bar.run is fire-and-forget and would
+    // leave the form showing the previous value.
+    onExited: function(code) {
+      if (code !== 0) root.loadError = "could not save that setting"
+      root.refresh()
+    }
+  }
+
   KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
@@ -189,6 +271,9 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // Keys.BeforeItem means this catcher sees every keystroke first, so a
+      // focused field would receive nothing without standing down here.
+      blocked: root.editing
       onCloseRequested: root.close()
       onReturnRequested: root.importFromDrop()
       onTabRequested: function(direction) { root.switchPanel(direction) }
@@ -206,6 +291,29 @@ Panel {
           id: column
           width: scroll.width
           spacing: Style.space(14)
+
+          // Two sibling columns with exclusive `visible` rather than a
+          // StackLayout: Column drops invisible children from implicitHeight,
+          // so the popup fits the tab on show instead of the taller of the two.
+          Connections {
+            target: root
+            function onActiveTabChanged() { scroll.contentY = 0 }
+          }
+
+          ButtonGroup {
+            options: [{ value: "overview", label: "Overview" },
+                      { value: "settings", label: "Settings" }]
+            value: root.activeTab
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onChanged: function(v) { root.activeTab = v }
+          }
+
+          // ================= OVERVIEW =================
+          Column {
+            width: parent.width
+            spacing: Style.space(14)
+            visible: root.activeTab === "overview"
 
           // ---- Hero: the one number this widget exists to show.
           Row {
@@ -428,6 +536,131 @@ Panel {
               }
             }
           }
+          }
+          // =============== end OVERVIEW ===============
+
+          // ================= SETTINGS =================
+          Column {
+            width: parent.width
+            spacing: Style.space(12)
+            visible: root.activeTab === "settings"
+
+            PanelSectionHeader {
+              text: "APPEARANCE"
+              foreground: root.dim
+              fontFamily: root.fontFamily
+            }
+
+            Toggle {
+              width: parent.width
+              label: "Show day count"
+              description: "Put the number of days beside the icon in the bar"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              checked: root.showDays
+              // Presentation lives on the bar entry, so this one writes
+              // shell.json and the pill changes on the click.
+              onClicked: root.toggleDays()
+            }
+
+            PanelSeparator { width: parent.width }
+
+            PanelSectionHeader {
+              text: "SYNC"
+              foreground: root.dim
+              fontFamily: root.fontFamily
+            }
+
+            NumberField {
+              id: staleField
+              Component.onCompleted: root.plainDigits(field)
+              label: root.cfgLabel("staleDays", "Overdue after (days)")
+              from: 1
+              to: 365
+              value: root.cfgValue("staleDays", 3)
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onModified: function(v) { root.saveConfig("staleDays", v) }
+            }
+
+            NumberField {
+              id: portField
+              Component.onCompleted: root.plainDigits(field)
+              label: root.cfgLabel("port", "Pairing port")
+              from: 1024
+              to: 65535
+              value: root.cfgValue("port", 8765)
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onModified: function(v) { root.saveConfig("port", v) }
+            }
+
+            Text {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              visible: root.cfgValue("port", 8765) !== 8765
+              text: "Changing the port needs a matching firewall rule: "
+                    + "sudo ufw allow " + root.cfgValue("port", 8765) + "/tcp"
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            NumberField {
+              id: timeoutField
+              Component.onCompleted: root.plainDigits(field)
+              label: root.cfgLabel("pairTimeout", "Pairing window (seconds)")
+              from: 30
+              to: 3600
+              stepSize: 30
+              value: root.cfgValue("pairTimeout", 300)
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onModified: function(v) { root.saveConfig("pairTimeout", v) }
+            }
+
+            Column {
+              width: parent.width
+              spacing: Style.space(4)
+
+              Text {
+                text: root.cfgLabel("watchDir", "Drop folder")
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              TextField {
+                id: watchField
+                width: parent.width
+                text: root.cfgValue("watchDir", "~/Downloads")
+                foreground: root.foreground
+                font.family: root.fontFamily
+                Keys.onPressed: function(event) {
+                  if (event.key === Qt.Key_Escape) {
+                    text = root.cfgValue("watchDir", "~/Downloads")
+                    root.endEditing()
+                    event.accepted = true
+                  } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    root.saveConfig("watchDir", text)
+                    root.endEditing()
+                    event.accepted = true
+                  }
+                }
+              }
+            }
+
+            Text {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              visible: root.loadError !== ""
+              text: root.loadError
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+          // =============== end SETTINGS ===============
         }
       }
     }

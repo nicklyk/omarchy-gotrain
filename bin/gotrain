@@ -643,6 +643,118 @@ def cmd_status(args, cfg, db):
     return 0
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# config
+#
+# Keys the settings tab may edit. Validation lives here rather than in QML so
+# the panel, the terminal and any future caller agree on what is legal.
+# ─────────────────────────────────────────────────────────────────────────────
+
+EDITABLE = {
+    "staleDays":   {"type": "int",  "min": 1,    "max": 365,
+                    "label": "Overdue after (days)"},
+    "port":        {"type": "int",  "min": 1024, "max": 65535,
+                    "label": "Pairing port"},
+    "pairTimeout": {"type": "int",  "min": 30,   "max": 3600,
+                    "label": "Pairing window (seconds)"},
+    "watchDir":    {"type": "path",
+                    "label": "Drop folder"},
+}
+
+
+def config_view(cfg) -> dict:
+    """Current value of every editable key, plus whether the user set it."""
+    try:
+        stored = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        stored = {}
+
+    out = {}
+    for key, spec in EDITABLE.items():
+        if key == "watchDir":
+            value = (cfg["watchDirs"] or ["~/Downloads"])[0]
+            user_set = "watchDirs" in stored
+        else:
+            value = cfg[key]
+            user_set = key in stored
+        out[key] = {"value": value, "default": not user_set,
+                    "label": spec["label"]}
+        for bound in ("min", "max"):
+            if bound in spec:
+                out[key][bound] = spec[bound]
+    return out
+
+
+def config_set(key: str, raw: str):
+    """Validate, then persist only what differs from DEFAULT_CONFIG."""
+    spec = EDITABLE.get(key)
+    if not spec:
+        die(f"unknown setting '{key}'. Editable: {', '.join(sorted(EDITABLE))}")
+
+    if spec["type"] == "int":
+        try:
+            value = int(str(raw).strip())
+        except ValueError:
+            die(f"{key} must be a whole number, got '{raw}'")
+        lo, hi = spec.get("min"), spec.get("max")
+        if lo is not None and value < lo or hi is not None and value > hi:
+            die(f"{key} must be between {lo} and {hi}, got {value}")
+        store_key, store_value = key, value
+    else:
+        text = str(raw).strip()
+        if not text:
+            die(f"{key} cannot be empty")
+        # Kept as written (with ~) so the config stays portable; expanded on use.
+        if not Path(text).expanduser().is_dir():
+            die(f"no such folder: {Path(text).expanduser()}")
+        store_key, store_value = "watchDirs", [text]
+
+    try:
+        stored = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        stored = {}
+
+    if store_value == DEFAULT_CONFIG[store_key]:
+        stored.pop(store_key, None)          # back to default: drop the override
+    else:
+        stored[store_key] = store_value
+
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps(stored, indent=2, ensure_ascii=False) + "\n")
+    return store_value
+
+
+def cmd_config(args, cfg, db):
+    if args.action == "list":
+        view = config_view(cfg)
+        if args.json:
+            print(json.dumps(view, ensure_ascii=False))
+            return 0
+        for key, info in view.items():
+            origin = "default" if info["default"] else "set"
+            print(f"  {key:<14}{str(info['value']):<28}({origin})")
+        print(f"\n  file: {CONFIG_PATH}"
+              f"{'' if CONFIG_PATH.exists() else '  (not created yet)'}")
+        return 0
+
+    if args.action == "get":
+        if not args.key:
+            die("config get needs a key")
+        view = config_view(cfg)
+        if args.key not in view:
+            die(f"unknown setting '{args.key}'")
+        print(view[args.key]["value"])
+        return 0
+
+    # set
+    if not args.key or args.value is None:
+        die("config set needs a key and a value")
+    value = config_set(args.key, args.value)
+    print(f"{args.key} = {value}")
+    poke_widget()
+    return 0
+
+
 def cmd_panel(args, cfg, db):
     """Everything the bar popup renders, in one process call."""
     out = compute_status(db, cfg)
@@ -677,6 +789,7 @@ def cmd_panel(args, cfg, db):
         if r["s"]
     ]
 
+    out["config"] = config_view(cfg)
     out["watchDirs"] = [str(Path(d).expanduser()) for d in cfg["watchDirs"]]
     out["pending"] = len(find_exports(cfg))
     out["appUrl"] = cfg["appUrl"]
@@ -1256,6 +1369,13 @@ def main(argv=None):
 
     p = sub.add_parser("doctor", help="check why the phone cannot reach this machine")
     p.set_defaults(fn=cmd_doctor)
+
+    p = sub.add_parser("config", help="show or change settings")
+    p.add_argument("action", choices=["list", "get", "set"], nargs="?", default="list")
+    p.add_argument("key", nargs="?")
+    p.add_argument("value", nargs="?")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_config)
 
     p = sub.add_parser("status", help="summary (the bar widget reads --json)")
     p.add_argument("--json", action="store_true")

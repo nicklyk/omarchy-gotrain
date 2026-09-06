@@ -4,9 +4,9 @@ Brings workout data from [GoTrain](https://niclick.org/GoTrain) — a
 backend-less PWA that keeps everything in one browser `localStorage` key — onto
 an Omarchy desktop, and keeps it there.
 
-A bar pill shows days since your last workout, turning urgent past a
-threshold. Clicking it opens recent sessions, this week's count and an
-eight-week muscle balance. A `gotrain` CLI does the same from a terminal.
+A bar pill shows the weight-lifting icon, turning urgent once you are overdue.
+Clicking it opens recent sessions, this week's count and an eight-week muscle
+balance, plus a Settings tab. A `gotrain` CLI does the same from a terminal.
 
 Nothing syncs on its own: there is no daemon, no timer, and no background
 network traffic. You move the data when you want to.
@@ -64,11 +64,52 @@ open.
 | `gotrain import FILE…` | Import specific files |
 | `gotrain pair [--port N]` | Show a QR code and receive one transfer |
 | `gotrain doctor` | Why the phone cannot reach this machine |
+| `gotrain config list\|get\|set` | Show or change settings |
 | `gotrain status [--json]` | Days since last workout, this week, total |
 | `gotrain list [-n N]` | Recent workouts |
 | `gotrain show ID` | One workout, exercise by exercise |
 | `gotrain stats` | Totals, date span, muscle groups, frequent exercises |
 | `gotrain export [-o FILE]` | Write a merged `tp4_state` to load back into GoTrain |
+
+## Settings
+
+The popup has two tabs. **Settings** covers everything worth tuning:
+
+| Setting | Effect | Stored in |
+|---|---|---|
+| Show day count | Adds `4d` beside the icon in the bar | `shell.json` bar entry |
+| Overdue after | Days before the icon turns urgent | `config.json` |
+| Pairing port | Port `gotrain pair` listens on | `config.json` |
+| Pairing window | How long `pair` waits before giving up | `config.json` |
+| Drop folder | Where `gotrain sync` looks for exports | `config.json` |
+
+Appearance lives on the bar entry, because it is presentation and applies the
+moment you click. Everything else lives in the CLI config so a terminal
+`gotrain status` can never disagree with the pill about whether you are
+overdue.
+
+The same settings from a terminal:
+
+```bash
+gotrain config list
+gotrain config set staleDays 5
+gotrain config get port
+```
+
+`config set` validates ranges and rejects unknown keys, and only writes what
+differs from the defaults — so an untouched install has an empty (or absent)
+config file. Change the pairing port and you will need a matching firewall
+rule; the tab says so, and `gotrain doctor` will confirm it.
+
+The day count is only hidden, not lost: it stays in the pill's tooltip
+alongside the last plan name and this week's total.
+
+Two IPC entry points, for keybindings:
+
+```bash
+omarchy-shell nl.gotrain settings     # open straight to the Settings tab
+omarchy-shell nl.gotrain toggleDays   # show/hide the day count
+```
 
 ## Where things live
 

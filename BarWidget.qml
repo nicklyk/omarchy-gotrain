@@ -19,8 +19,10 @@ BarWidget {
   // widget and its data layer are always the same version.
   readonly property string cli: Qt.resolvedUrl("bin/gotrain").toString().replace("file://", "")
 
-  readonly property int staleDays: parseInt(setting("staleDays", 3)) || 3
-  readonly property bool showDays: String(setting("showDays", true)) !== "false"
+  // Icon-only by default; the day count is one hover away in the tooltip, and
+  // the Settings tab turns it back on. Manifest `defaults` are inert in
+  // Omarchy 4.0, so this fallback is the real default.
+  readonly property bool showDays: String(setting("showDays", false)) === "true"
 
   property bool hasData: false
   property int daysSince: -1
@@ -69,6 +71,8 @@ BarWidget {
   function open() { if (panelLoader.item) panelLoader.item.openFromHotkey() }
   function close() { if (panelLoader.item) panelLoader.item.close() }
   function togglePanel() { if (panelLoader.item) panelLoader.item.toggle() }
+  function openSettings() { if (panelLoader.item) panelLoader.item.openTab("settings") }
+  function toggleDays() { if (panelLoader.item) panelLoader.item.toggleDays() }
   function closeForPopoutSwitch() { if (panelLoader.item) panelLoader.item.closeForPopoutSwitch() }
 
   function injectPanel() {
@@ -103,9 +107,10 @@ BarWidget {
           root.daysSince = s.daysSince === null || s.daysSince === undefined ? -1 : s.daysSince
           root.lastPlan = s.lastPlan || ""
           root.weekCount = s.weekCount || 0
-          // The CLI applies its own configured threshold; the widget setting
-          // wins when the two disagree, since that is what the user edited.
-          root.stale = root.hasData && root.daysSince >= root.staleDays
+          // Trust the CLI's verdict rather than recomputing it here: the
+          // threshold lives in ~/.config/gotrain/config.json so the pill and a
+          // terminal `gotrain status` can never disagree.
+          root.stale = s.stale === true
         } catch (e) {
           root.hasData = false
         }
@@ -132,6 +137,8 @@ BarWidget {
     // that owns the IPC target.
     function refresh(): void { root.broadcast("refresh") }
     function sync(): void { root.syncFromDrop() }
+    function settings(): void { root.openSettings() }
+    function toggleDays(): void { root.toggleDays() }
     function open(): void { root.open() }
     function close(): void { root.close() }
     function show(): void { root.open() }
