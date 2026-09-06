@@ -41,7 +41,7 @@ DB_PATH = DATA_DIR / "gotrain.db"
 SNAPSHOT_DIR = DATA_DIR / "snapshots"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
-WIDGET_IPC_TARGET = "nl.gotrain"
+WIDGET_IPC_TARGET = "nicklyk.gotrain"
 
 DEFAULT_CONFIG = {
     # Where `gotrain sync` looks for exports dropped by LocalSend or a browser.

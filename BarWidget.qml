@@ -13,7 +13,7 @@ import qs.Ui
 // middle click just re-reads.
 BarWidget {
   id: root
-  moduleName: "nl.gotrain"
+  moduleName: "nicklyk.gotrain"
 
   // The bundled CLI, not whatever `gotrain` happens to be on PATH, so the
   // widget and its data layer are always the same version.
@@ -130,7 +130,7 @@ BarWidget {
   }
 
   IpcHandler {
-    target: "nl.gotrain"
+    target: "nicklyk.gotrain"
 
     // `gotrain import` calls this after a successful sync. A bar surface
     // exists per monitor, so relay to every instance rather than just the one

@@ -12,8 +12,8 @@ import qs.Ui
 // local SQLite archive. Nothing in this file reaches the network.
 Panel {
   id: root
-  moduleName: "nl.gotrain"
-  ipcTarget: "nl.gotrain"
+  moduleName: "nicklyk.gotrain"
+  ipcTarget: "nicklyk.gotrain"
   // The bar widget owns the IPC target; a second handler on the same name
   // would collide with it.
   manageIpc: false
@@ -148,7 +148,7 @@ Panel {
     root.persistSettings({ showDays: !root.showDays })
   }
 
-  // Jump straight to one tab, for a keybinding or `omarchy-shell nl.gotrain
+  // Jump straight to one tab, for a keybinding or `omarchy-shell nicklyk.gotrain
   // settings`.
   function openTab(tab) {
     root.activeTab = tab === "settings" ? "settings" : "overview"

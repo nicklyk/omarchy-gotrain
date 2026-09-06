@@ -11,6 +11,10 @@ balance, plus a Settings tab. A `gotrain` CLI does the same from a terminal.
 Nothing syncs on its own: there is no daemon, no timer, and no background
 network traffic. You move the data when you want to.
 
+| Overview | Settings |
+|---|---|
+| ![Overview tab](docs/preview-overview.png) | ![Settings tab](docs/preview-settings.png) |
+
 ## Getting data across
 
 GoTrain has no server, so "sync" means getting `tp4_state` off the phone.
@@ -107,8 +111,8 @@ alongside the last plan name and this week's total.
 Two IPC entry points, for keybindings:
 
 ```bash
-omarchy-shell nl.gotrain settings     # open straight to the Settings tab
-omarchy-shell nl.gotrain toggleDays   # show/hide the day count
+omarchy-shell nicklyk.gotrain settings     # open straight to the Settings tab
+omarchy-shell nicklyk.gotrain toggleDays   # show/hide the day count
 ```
 
 ## Where things live
@@ -128,21 +132,62 @@ into either.
 Config keys: `watchDirs`, `watchGlobs`, `port`, `maxUrlPayload`, `pairTimeout`,
 `staleDays`, `origin`, `appUrl`.
 
+## Requirements
+
+| | |
+|---|---|
+| Omarchy | 4.x (Quickshell shell with plugin support) |
+| Python | 3.9+, **standard library only** — no pip packages |
+| `qrencode` | only for `gotrain pair`; everything else works without it |
+| LocalSend | optional, on both devices, for the share-sheet route |
+
+No build step, no runtime dependencies to install, no network access except
+the pairing receiver you start yourself.
+
 ## Install
 
 ```bash
-omarchy plugin add <git-url> --enable
-ln -s ~/.config/omarchy/plugins/nl.gotrain/bin/gotrain ~/.local/bin/gotrain
+omarchy plugin add https://github.com/nicklyk/omarchy-gotrain.git --enable
+ln -s ~/.config/omarchy/plugins/nicklyk.gotrain/bin/gotrain ~/.local/bin/gotrain
 ```
 
 The symlink has to live outside the plugin directory — `omarchy plugin
-validate` rejects symlinks inside one.
+validate` rejects symlinks inside one. It is optional; it only puts `gotrain`
+on your `PATH`, and the widget always calls its own bundled copy.
 
-Widget settings (`staleDays`, `showDays`) are stored inline on the bar layout
-entry in `~/.config/omarchy/shell.json`.
+If you want the pairing code to work, open the port once:
 
-Requires Omarchy 4.x, Python 3 (standard library only), and `qrencode` for the
-pairing code.
+```bash
+sudo ufw allow 8765/tcp comment 'gotrain pair'
+```
+
+## Removal
+
+```bash
+omarchy plugin remove nicklyk.gotrain
+rm -f ~/.local/bin/gotrain
+sudo ufw delete allow 8765/tcp          # only if you added the rule
+```
+
+That leaves your workout archive alone. To delete that too:
+
+```bash
+rm -rf ~/.local/share/gotrain ~/.config/gotrain
+```
+
+## What it writes
+
+Nothing is changed without you asking for it:
+
+- `~/.local/share/gotrain/` — the workout archive and raw snapshots, written
+  when you import.
+- `~/.config/gotrain/config.json` — created the first time you change a
+  setting, and only holds keys that differ from the defaults.
+- `~/.config/omarchy/shell.json` — only the plugin's own bar entry, and only
+  when you toggle *Show day count*. No other part of the file is touched.
+
+It never edits your firewall, never installs packages, and never runs anything
+at boot or on a timer.
 
 ## iOS notes
 
