@@ -56,7 +56,7 @@ DEFAULT_CONFIG = {
     # Ceiling on the base64url payload a phone may put in a `GET /recv` URL.
     # http.server hardcodes a 65536-byte request line, so stay clear of it.
     "maxUrlPayload": 50000,
-    "pairTimeout": 120,
+    "pairTimeout": 300,
     "staleDays": 3,
     "origin": "https://niclick.org",
     "appUrl": "https://niclick.org/GoTrain",
@@ -762,6 +762,77 @@ def cmd_export(args, cfg, db):
     return 0
 
 
+def cmd_doctor(args, cfg, db):
+    """Answer "why can't my phone reach this machine" in one screen.
+
+    Written because the first real pairing attempt failed with nothing to go
+    on: the phone said "cannot connect" and this side said nothing at all.
+    """
+    port = cfg["port"]
+    problems = []
+
+    def row(label, value, note=""):
+        print(f"  {label:<18}{value}" + (f"   {note}" if note else ""))
+
+    ip = lan_ip()
+    iface, cidr = iface_for(ip)
+    print("network")
+    row("interface", iface or "?")
+    subnet = cidr.rsplit(".", 1)[0] + ".0/" + cidr.split("/")[1] if cidr else "?"
+    row("address", cidr or ip, f"phone must be on {subnet}")
+    if ip.startswith("127."):
+        problems.append("no LAN address -- this machine is not on a network")
+    free = port_is_free(port)
+    row(f"port {port}", "free" if free else "IN USE",
+        "" if free else "another process holds it")
+
+    print("firewall")
+    fw = firewall_status(port)
+    if not fw["present"]:
+        row("ufw", "not installed", "nothing to configure")
+    else:
+        state = "active" if (fw["enabled"] and fw["active"]) else "inactive"
+        row("ufw", state)
+        if state == "active":
+            if fw["allowed"]:
+                row(f"rule for {port}", "ok")
+                for r in fw["rules"][:2]:
+                    row("", r)
+            elif not fw["checked"]:
+                row(f"rule for {port}", "UNKNOWN", "rules not readable")
+            else:
+                row(f"rule for {port}", "MISSING")
+                row("", f"fix: {firewall_fix_command(port)}")
+                problems.append(f"ufw blocks port {port}")
+    blocks = firewall_blocks(port, minutes=60)
+    if blocks:
+        who = ", ".join(sorted({b for _, b in blocks}))
+        row("blocked recently", f"{len(blocks)} attempt(s) from {who}",
+            f"last {blocks[-1][0]}")
+
+    print("tools")
+    row("qrencode", "ok" if have("qrencode") else "MISSING (no QR code)")
+    if not have("qrencode"):
+        problems.append("qrencode is not installed")
+    row("omarchy-shell", "ok" if have("omarchy-shell") else "absent (widget will not refresh)")
+
+    print("data")
+    total = db.execute("SELECT COUNT(*) AS c FROM workouts").fetchone()["c"]
+    row("archive", str(DB_PATH), f"{total} workout(s)")
+    for d in cfg["watchDirs"]:
+        path = Path(d).expanduser()
+        row("watch folder", str(path),
+            "missing" if not path.is_dir() else f"{len(find_exports(cfg))} export(s) waiting")
+
+    print()
+    if problems:
+        for p_ in problems:
+            print(f"problem: {p_}", file=sys.stderr)
+        return 1
+    print("No problems found. Run `gotrain pair` and scan from the app.")
+    return 0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # pair: one-shot LAN receiver
 # ─────────────────────────────────────────────────────────────────────────────
@@ -776,6 +847,112 @@ def lan_ip() -> str:
         return "127.0.0.1"
     finally:
         s.close()
+
+
+def iface_for(ip: str):
+    """Interface and prefix carrying `ip`, for the doctor's network summary."""
+    out = subprocess.run(["ip", "-o", "-4", "addr", "show"],
+                         capture_output=True, text=True, check=False).stdout
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[3].split("/")[0] == ip:
+            return parts[1], parts[3]
+    return None, None
+
+
+def port_is_free(port: int) -> bool:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("0.0.0.0", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def firewall_status(port: int) -> dict:
+    """Is ufw going to drop the phone's connection to `port`?
+
+    Every check here reads world-readable state -- no sudo. Omarchy enables ufw
+    with `default deny incoming` and opens only 53317 for LocalSend, so a
+    custom port is dropped unless something allows it.
+    """
+    info = {"present": have("ufw"), "enabled": False, "active": False,
+            "allowed": False, "rules": [], "checked": False}
+    if not info["present"]:
+        return info
+
+    conf = Path("/etc/ufw/ufw.conf")
+    try:
+        info["enabled"] = bool(re.search(r"^ENABLED=yes", conf.read_text(), re.M))
+    except OSError:
+        pass
+
+    info["active"] = subprocess.run(
+        ["systemctl", "is-active", "ufw"], capture_output=True, text=True,
+        check=False).stdout.strip() == "active"
+
+    for rules_file in ("/etc/ufw/user.rules", "/etc/ufw/user6.rules"):
+        try:
+            text = Path(rules_file).read_text()
+        except OSError:
+            continue
+        info["checked"] = True
+        for line in text.splitlines():
+            # e.g. "### tuple ### allow tcp 8765 0.0.0.0/0 any 0.0.0.0/0 in"
+            if line.startswith("### tuple ###") and f" {port} " in line:
+                info["rules"].append(line.replace("### tuple ### ", "").strip())
+                info["allowed"] = True
+    return info
+
+
+def firewall_blocks(port: int, minutes: int = 60) -> list:
+    """Recent ufw drops aimed at `port`, as (time, source-ip) pairs.
+
+    This is what turns "cannot connect" into a named diagnosis: the kernel
+    records the phone's own address and the moment it tried.
+    """
+    try:
+        out = subprocess.run(
+            ["journalctl", "-k", "--since", f"-{minutes}min", "--no-pager"],
+            capture_output=True, text=True, check=False, timeout=15).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    hits = []
+    for line in out.splitlines():
+        if "UFW BLOCK" not in line or f"DPT={port} " not in line:
+            continue
+        src = re.search(r"SRC=(\S+)", line)
+        when = " ".join(line.split()[:3])
+        if src:
+            hits.append((when, src.group(1)))
+    return hits
+
+
+def firewall_fix_command(port: int) -> str:
+    return f"sudo ufw allow {port}/tcp comment 'gotrain pair'"
+
+
+def firewall_preflight(port: int, force: bool):
+    """Refuse to show a QR code the phone cannot possibly reach."""
+    fw = firewall_status(port)
+    if not (fw["present"] and fw["enabled"] and fw["active"]):
+        return
+    if fw["allowed"] or not fw["checked"]:
+        return
+    if force:
+        print(f"{APP}: warning: no ufw rule allows port {port}; "
+              f"pairing anyway (--force)\n", file=sys.stderr)
+        return
+    die(
+        f"ufw is active and nothing allows port {port}, so the phone cannot\n"
+        f"       reach this machine. Run:\n\n"
+        f"           {firewall_fix_command(port)}\n\n"
+        f"       then try again.  (--force to pair anyway, "
+        f"`{APP} doctor` for detail)"
+    )
 
 
 def print_qr(payload: str):
@@ -807,8 +984,22 @@ class Receiver(BaseHTTPRequestHandler):
     result: dict = {}
     finished: threading.Event
 
-    def log_message(self, fmt, *args):  # quieter than the default stderr spam
-        pass
+    # Every request is recorded so a timeout can distinguish "nothing ever
+    # reached this machine" (firewall, wrong network) from "it arrived and was
+    # rejected". Without this the failure is silent on both ends.
+    arrivals: list = []
+
+    def log_message(self, fmt, *args):
+        pass                                   # replaced by note() below
+
+    def note(self, status, detail=""):
+        stamp = datetime.now().strftime("%H:%M:%S")
+        path = self.path.split("?")[0]
+        line = f"  {stamp}  {self.command} {path:<8} {status}"
+        if detail:
+            line += f"  {detail}"
+        print(line, file=sys.stderr, flush=True)
+        type(self).arrivals.append((status, detail))
 
     # -- plumbing ----------------------------------------------------------
     def _cors(self):
@@ -820,6 +1011,8 @@ class Receiver(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Max-Age", "600")
 
     def _send(self, code, body=b"", ctype="text/plain; charset=utf-8", extra=None):
+        if self.command != "OPTIONS":
+            self.note(int(code))
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -957,6 +1150,7 @@ def b64url_decode(data: bytes) -> bytes:
 
 def cmd_pair(args, cfg, db):
     port = args.port or cfg["port"]
+    firewall_preflight(port, args.force)
     token = secrets.token_urlsafe(16)
     ip = lan_ip()
     cursor = meta_get(db, "cursor_ts", "") or ""
@@ -967,6 +1161,7 @@ def cmd_pair(args, cfg, db):
 
     handler = type("BoundReceiver", (Receiver,), {
         "token": token, "cfg": cfg, "result": {}, "finished": finished,
+        "arrivals": [],
     })
 
     try:
@@ -984,7 +1179,9 @@ def cmd_pair(args, cfg, db):
         print("First sync: the phone will send everything.")
     # Explicit flush: stdout is block-buffered when piped, and this command
     # prints something to look at and then blocks.
-    print(f"Listening on http://{ip}:{port} -- Ctrl-C to stop.\n", flush=True)
+    mins, secs = divmod(int(cfg["pairTimeout"]), 60)
+    print(f"Listening on http://{ip}:{port} for up to {mins}:{secs:02d} "
+          f"-- Ctrl-C to stop.\n", flush=True)
 
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -992,8 +1189,28 @@ def cmd_pair(args, cfg, db):
     timeout = cfg["pairTimeout"]
     try:
         if not finished.wait(timeout):
-            print(f"Timed out after {timeout}s with no transfer.", file=sys.stderr)
             httpd.shutdown()
+            # Which of the two failures happened is the whole diagnosis, and
+            # it is exactly what the receiver used to swallow.
+            if not handler.arrivals:
+                print(f"\nTimed out after {timeout}s -- no connection attempt "
+                      f"reached this machine.", file=sys.stderr)
+                blocks = firewall_blocks(port, minutes=10)
+                if blocks:
+                    who = ", ".join(sorted({ip for _, ip in blocks}))
+                    print(f"The firewall dropped {len(blocks)} attempt(s) from "
+                          f"{who}. Run:\n\n    {firewall_fix_command(port)}\n",
+                          file=sys.stderr)
+                else:
+                    print(f"Check that the phone is on the same network as "
+                          f"{ip}, then run `{APP} doctor`.", file=sys.stderr)
+            else:
+                last = handler.arrivals[-1]
+                print(f"\nTimed out after {timeout}s. A request arrived but did "
+                      f"not complete (last: {last[0]}"
+                      f"{' ' + last[1] if last[1] else ''}).\n"
+                      f"If it was rejected, rescan for a fresh code -- each "
+                      f"pairing code works once.", file=sys.stderr)
             return 1
     except KeyboardInterrupt:
         print("\nCancelled.")
@@ -1033,7 +1250,12 @@ def main(argv=None):
 
     p = sub.add_parser("pair", help="show a QR code and receive one transfer")
     p.add_argument("--port", type=int)
+    p.add_argument("--force", action="store_true",
+                   help="pair even if no firewall rule allows the port")
     p.set_defaults(fn=cmd_pair)
+
+    p = sub.add_parser("doctor", help="check why the phone cannot reach this machine")
+    p.set_defaults(fn=cmd_doctor)
 
     p = sub.add_parser("status", help="summary (the bar widget reads --json)")
     p.add_argument("--json", action="store_true")

@@ -34,6 +34,28 @@ when you have the choice.
 **A file.** `gotrain import path/to/export.json` takes whatever arrives by any
 other means — a cable, an email to yourself, a browser download.
 
+## Firewall
+
+Omarchy denies incoming connections by default — its installer opens exactly
+one port for device-to-device transfer, `53317` for LocalSend. The pairing
+receiver uses `8765`, so it needs one rule before a phone can reach it:
+
+```bash
+sudo ufw allow 8765/tcp comment 'gotrain pair'
+```
+
+Without it the phone just reports "cannot connect": ufw drops the SYN and
+nothing on this side ever sees a request. `gotrain pair` checks for the rule
+and refuses to print a QR code that cannot work; `gotrain doctor` explains
+why, and will name the address that was blocked and when.
+
+Nothing listens on the port except during the few minutes `gotrain pair` is
+running, and the receiver wants a 128-bit token and serves exactly one
+transfer, so an idle open port simply refuses connections.
+
+The share sheet route needs no rule of its own — LocalSend's port is already
+open.
+
 ## Commands
 
 | Command | What it does |
@@ -41,6 +63,7 @@ other means — a cable, an email to yourself, a browser download.
 | `gotrain sync` | Import the newest export from the watch folders |
 | `gotrain import FILE…` | Import specific files |
 | `gotrain pair [--port N]` | Show a QR code and receive one transfer |
+| `gotrain doctor` | Why the phone cannot reach this machine |
 | `gotrain status [--json]` | Days since last workout, this week, total |
 | `gotrain list [-n N]` | Recent workouts |
 | `gotrain show ID` | One workout, exercise by exercise |
