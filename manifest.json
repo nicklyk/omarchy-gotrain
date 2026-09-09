@@ -4,7 +4,7 @@
   "name": "GoTrain",
   "version": "1.1.0",
   "author": "Nikolaos Lykouresis",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "description": "Workout tracking synced from the GoTrain PWA",
   "kinds": [
     "bar-widget"

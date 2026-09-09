@@ -235,4 +235,8 @@ from an HTTPS page.
 
 ## License
 
-MIT.
+GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+The desktop plugin and the [GoTrain app](https://github.com/nicklyk/GoTrain)
+it syncs from are both free software: you may use, study, change and share
+them, and anyone you pass a modified version to gets those same freedoms.
