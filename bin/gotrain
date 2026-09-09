@@ -314,7 +314,11 @@ def validate_state(state, kind: str):
     if not isinstance(state, dict):
         raise ValueError("not a JSON object")
     if kind == "full":
-        if not state.get("plans") or not state.get("activePlanId"):
+        # Mirrors GoTrain's importData(): a plan library is required to be
+        # present, but may legitimately be empty -- a fresh install ships no
+        # preset plan, so `plans: []` with a null activePlanId is a valid
+        # export rather than a malformed one.
+        if not isinstance(state.get("plans"), list) or "activePlanId" not in state:
             raise ValueError(
                 "missing 'plans'/'activePlanId' -- this does not look like a "
                 "GoTrain export"
