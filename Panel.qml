@@ -108,8 +108,15 @@ Panel {
     Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
   }
 
+  // Widgets are handed a bar *api* object, not the Bar itself, and on that api
+  // centerHoverRevealSuppressed is a bound -- therefore read-only -- property.
+  // Assigning to it throws. The function is the supported write path; the
+  // assignment stays only as a fallback for a bar that lacks it.
   function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && "centerHoverRevealSuppressed" in root.bar)
+    if (!root.bar) return
+    if (typeof root.bar.setCenterHoverRevealSuppressed === "function")
+      root.bar.setCenterHoverRevealSuppressed(value)
+    else if ("centerHoverRevealSuppressed" in root.bar)
       root.bar.centerHoverRevealSuppressed = value
   }
 
@@ -119,8 +126,8 @@ Panel {
   }
 
   function open() {
-    setCenterHoverRevealSuppressed(false)
     root.controller.show()
+    setCenterHoverRevealSuppressed(false)
     refresh()
   }
 
@@ -135,8 +142,11 @@ Panel {
   }
 
   function close() {
-    setCenterHoverRevealSuppressed(false)
+    // Hide first. A throw anywhere after this must not be able to leave the
+    // panel stuck open -- which is exactly what a read-only property
+    // assignment on the first line used to do.
     root.controller.hide()
+    setCenterHoverRevealSuppressed(false)
   }
 
   function toggle() {
