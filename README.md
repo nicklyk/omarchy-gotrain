@@ -6,14 +6,15 @@ an Omarchy desktop, and keeps it there.
 
 A bar pill shows the weight-lifting icon, turning urgent once you are overdue.
 Clicking it opens recent sessions, this week's count and an eight-week muscle
-balance, plus a Settings tab. A `gotrain` CLI does the same from a terminal.
+balance, a Progress tab showing how the load on each exercise has moved, and a
+Settings tab. A `gotrain` CLI does the same from a terminal.
 
 Nothing syncs on its own: there is no daemon, no timer, and no background
 network traffic. You move the data when you want to.
 
-| Overview | Settings |
-|---|---|
-| ![Overview tab](docs/preview-overview.png) | ![Settings tab](docs/preview-settings.png) |
+| Overview | Progress | Settings |
+|---|---|---|
+| ![Overview tab](docs/preview-overview.png) | ![Progress tab](docs/preview-progress.png) | ![Settings tab](docs/preview-settings.png) |
 
 ## Getting data across
 
@@ -67,6 +68,8 @@ open.
 | `gotrain sync` | Import the newest export from the watch folders |
 | `gotrain import FILE…` | Import specific files |
 | `gotrain pair [--port N]` | Show a QR code and receive one transfer |
+| `gotrain progress [name]` | How the load on each exercise has moved |
+| `gotrain records` | Best ever load per exercise |
 | `gotrain doctor` | Why the phone cannot reach this machine |
 | `gotrain config list\|get\|set` | Show or change settings |
 | `gotrain status [--json]` | Days since last workout, this week, total |
@@ -74,6 +77,34 @@ open.
 | `gotrain show ID` | One workout, exercise by exercise |
 | `gotrain stats` | Totals, date span, muscle groups, frequent exercises |
 | `gotrain export [-o FILE]` | Write a merged `tp4_state` to load back into GoTrain |
+
+## Progress
+
+GoTrain stores the load you set for each exercise alongside every session, so
+the archive already holds a dated series per movement. The **Progress** tab and
+`gotrain progress` read it back:
+
+```
+  exercise                 now    best   change   trend
+  Leg Press               60kg    60kg    +20kg   ▁▁▁▁▄▄▄████████████ *
+  Chest Press             30kg    30kg    +10kg   ▁▁▁▄▄▄████████████ *
+  Shoulder Press          10kg    15kg     -5kg   ███▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+```
+
+Name one exercise (`gotrain progress "Leg Press"`) for its full dated series
+with the step changes marked, or `gotrain records` for the best ever lift per
+exercise and the date you first hit it.
+
+Importing a workout that beats a previous best says so in the notification —
+*"Imported 1 workout · PR: Leg Press 60 kg"*. A first import stays quiet rather
+than declaring every exercise a record.
+
+Direction is shown by an arrow and a signed number, not by colour alone: on
+themes like `white` the accent and urgent colours are both greys, so a
+colour-only cue would say nothing at all there.
+
+Exercises measured in time rather than weight (a treadmill, say) are tracked
+the same way in minutes.
 
 ## Settings
 

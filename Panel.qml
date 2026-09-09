@@ -42,7 +42,10 @@ Panel {
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
-  readonly property color dim: Qt.darker(foreground, 1.55)
+  // Alpha over the surface, never Qt.darker: on a light theme darkening the
+  // foreground *raises* contrast, so "muted" text would come out bolder than
+  // the body text above it. Alpha recedes identically on any ground.
+  readonly property color dim: Util.alpha(foreground, 0.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property bool hasData: data && data.hasData === true
@@ -52,6 +55,37 @@ Panel {
   readonly property var recent: data && data.recent ? data.recent : []
   readonly property var muscles: data && data.muscles ? data.muscles : []
   readonly property int pending: data && data.pending ? data.pending : 0
+  readonly property var progress: data && data.progress ? data.progress : []
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
+
+  function loadText(value, unit) {
+    return (Math.round(value * 10) / 10) + (unit || "kg")
+  }
+
+  // Gain / loss is carried by the arrow and the sign, not by the colour. On
+  // the `white` theme accent and urgent are both pure greys (chroma 0), so a
+  // colour-only encoding would say nothing at all there.
+  function changeGlyph(v) { return v > 0 ? "\u2191" : (v < 0 ? "\u2193" : "\u00b7") }
+  function changeText(v, unit) {
+    if (v === 0) return "\u00b7 no change"
+    return changeGlyph(v) + " " + (v > 0 ? "+" : "") + loadText(v, unit)
+  }
+  // Color.accent, not bar.accent: the bar api exposes foreground, background
+  // and urgent only -- there is no accent on it, and reading one yields
+  // undefined. The singleton is theme-driven either way.
+  readonly property color gain: Color.accent
+
+  function changeColor(v) {
+    return v > 0 ? root.gain : (v < 0 ? root.urgent : root.dim)
+  }
+
+  function progressTooltip(row) {
+    return row.name + " \u00b7 " + row.sessions + " sessions\n"
+      + loadText(row.first, row.unit) + " \u2192 " + loadText(row.current, row.unit)
+      + "  (best " + loadText(row.best, row.unit) + ")"
+      + (row.atBest && row.change > 0 ? "\nat personal best" : "")
+  }
 
   readonly property int maxMuscleSets: {
     var m = 0
@@ -160,8 +194,10 @@ Panel {
 
   // Jump straight to one tab, for a keybinding or `omarchy-shell nicklyk.gotrain
   // settings`.
+  readonly property var tabs: ["overview", "progress", "settings"]
+
   function openTab(tab) {
-    root.activeTab = tab === "settings" ? "settings" : "overview"
+    root.activeTab = root.tabs.indexOf(tab) >= 0 ? tab : "overview"
     if (!root.opened) root.openFromHotkey()
     else root.refresh()
   }
@@ -312,6 +348,7 @@ Panel {
 
           ButtonGroup {
             options: [{ value: "overview", label: "Overview" },
+                      { value: "progress", label: "Progress" },
                       { value: "settings", label: "Settings" }]
             value: root.activeTab
             foreground: root.foreground
@@ -548,6 +585,141 @@ Panel {
           }
           }
           // =============== end OVERVIEW ===============
+
+          // ================= PROGRESS =================
+          Column {
+            width: parent.width
+            spacing: Style.space(10)
+            visible: root.activeTab === "progress"
+
+            PanelSectionHeader {
+              text: "LOAD PER EXERCISE"
+              foreground: root.dim
+              fontFamily: root.fontFamily
+            }
+
+            Text {
+              width: parent.width
+              wrapMode: Text.WordWrap
+              visible: root.progress.length === 0
+              text: "No weights recorded yet. GoTrain stores the load you set "
+                    + "for each exercise, so this fills in as you train."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Repeater {
+              model: root.progress
+
+              Item {
+                id: progressRow
+                required property var modelData
+                width: column.width
+                height: Style.space(24)
+
+                readonly property real lo: Math.min.apply(null, modelData.series)
+                readonly property real hi: Math.max.apply(null, modelData.series)
+
+                Text {
+                  id: exName
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width * 0.34
+                  elide: Text.ElideRight
+                  text: progressRow.modelData.name
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                // Sparkline. Bars rather than a line because load moves in
+                // discrete plate-sized steps; a smoothed line would imply
+                // values that were never lifted. One series, so one colour --
+                // height already encodes magnitude and a ramp would say it twice.
+                Row {
+                  id: sparkline
+                  anchors.left: exName.right
+                  anchors.leftMargin: Style.space(8)
+                  anchors.right: valueText.left
+                  anchors.rightMargin: Style.space(12)
+                  anchors.verticalCenter: parent.verticalCenter
+                  height: Style.space(16)
+                  spacing: Style.space(2)
+                  layoutDirection: Qt.RightToLeft   // newest pinned to the right
+
+                  readonly property int slot: Style.space(3) + spacing
+                  readonly property int shown:
+                    Math.max(1, Math.min(progressRow.modelData.series.length,
+                                         Math.floor((width + spacing) / slot)))
+
+                  Repeater {
+                    model: sparkline.shown
+
+                    Rectangle {
+                      required property int index
+                      // Right-to-left: index 0 is the newest reading.
+                      readonly property int pos:
+                        progressRow.modelData.series.length - 1 - index
+                      readonly property real value: progressRow.modelData.series[pos]
+                      readonly property real span: progressRow.hi - progressRow.lo
+
+                      width: Style.space(3)
+                      radius: Style.cornerRadius > 0 ? width / 2 : 0
+                      // The floor is a third of the height, not a hairline: the
+                      // lowest reading is still a lift, and a 3px stub reads as
+                      // dirt on the screen rather than data. A flat series sits
+                      // mid-height rather than collapsing.
+                      readonly property real floorHeight: sparkline.height * 0.34
+                      height: span > 0
+                        ? floorHeight + (value - progressRow.lo) / span * (sparkline.height - floorHeight)
+                        : sparkline.height * 0.5
+                      anchors.bottom: parent.bottom
+                      color: index === 0 ? root.foreground : Util.alpha(root.foreground, 0.45)
+                    }
+                  }
+                }
+
+                Text {
+                  id: valueText
+                  anchors.right: changeChip.left
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.loadText(progressRow.modelData.current, progressRow.modelData.unit)
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Text {
+                  id: changeChip
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(72)
+                  horizontalAlignment: Text.AlignRight
+                  elide: Text.ElideRight
+                  text: root.changeText(progressRow.modelData.change, progressRow.modelData.unit)
+                  color: root.changeColor(progressRow.modelData.change)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                MouseArea {
+                  id: rowHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  acceptedButtons: Qt.NoButton
+                }
+
+                PanelToolTip {
+                  visible: rowHover.containsMouse
+                  text: root.progressTooltip(progressRow.modelData)
+                  fontFamily: root.fontFamily
+                }
+              }
+            }
+          }
+          // =============== end PROGRESS ===============
 
           // ================= SETTINGS =================
           Column {

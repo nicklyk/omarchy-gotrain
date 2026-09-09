@@ -72,6 +72,7 @@ BarWidget {
   function close() { if (panelLoader.item) panelLoader.item.close() }
   function togglePanel() { if (panelLoader.item) panelLoader.item.toggle() }
   function openSettings() { if (panelLoader.item) panelLoader.item.openTab("settings") }
+  function openProgress() { if (panelLoader.item) panelLoader.item.openTab("progress") }
   function toggleDays() { if (panelLoader.item) panelLoader.item.toggleDays() }
   function closeForPopoutSwitch() { if (panelLoader.item) panelLoader.item.closeForPopoutSwitch() }
 
@@ -138,6 +139,7 @@ BarWidget {
     function refresh(): void { root.broadcast("refresh") }
     function sync(): void { root.syncFromDrop() }
     function settings(): void { root.openSettings() }
+    function progress(): void { root.openProgress() }
     function toggleDays(): void { root.toggleDays() }
     function open(): void { root.open() }
     function close(): void { root.close() }
