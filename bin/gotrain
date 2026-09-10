@@ -521,6 +521,50 @@ def read_state_bytes(raw: bytes):
 SPARK = "▁▂▃▄▅▆▇█"
 
 
+# GoTrain stores muscle groups as language-independent keys since schema 2,
+# but the archive still holds the German and English labels written before
+# that. Normalise both to one key so a chart does not show "Rücken" and
+# "back" as two separate groups, and render an English label for display.
+
+MUSCLE_ALIASES = {
+    "bauch": "abs", "abs": "abs",
+    "rücken": "back", "ruecken": "back", "back": "back",
+    "bizeps": "biceps", "biceps": "biceps",
+    "waden": "calves", "calves": "calves",
+    "cardio": "cardio",
+    "brust": "chest", "chest": "chest",
+    "unterarme": "forearms", "forearms": "forearms",
+    "ganzkörper": "fullbody", "ganzkoerper": "fullbody",
+    "full body": "fullbody", "fullbody": "fullbody",
+    "allgemein": "general", "general": "general",
+    "gesäß": "glutes", "gesaess": "glutes", "glutes": "glutes",
+    "beine": "legs", "legs": "legs",
+    "nacken": "neck", "neck": "neck",
+    "schulter": "shoulders", "shoulders": "shoulders",
+    "trizeps": "triceps", "triceps": "triceps",
+}
+
+MUSCLE_LABELS = {
+    "abs": "Abs", "back": "Back", "biceps": "Biceps", "calves": "Calves",
+    "cardio": "Cardio", "chest": "Chest", "forearms": "Forearms",
+    "fullbody": "Full body", "general": "General", "glutes": "Glutes",
+    "legs": "Legs", "neck": "Neck", "shoulders": "Shoulders",
+    "triceps": "Triceps",
+}
+
+
+def muscle_key(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return MUSCLE_ALIASES.get(text.lower(), text)
+
+
+def muscle_label(value) -> str:
+    key = muscle_key(value)
+    return MUSCLE_LABELS.get(key, key)
+
+
 def weight(v):
     """Parse GoTrain's load strings. '60', '60,5', '', None and '8-12' all occur."""
     if v is None:
@@ -555,7 +599,8 @@ def load_series(db, name=None):
         if value is None:
             continue
         entry = out.setdefault(r["name"] or "?", {
-            "muscle": r["muscle"] or "", "unit": "min" if timed else "kg", "points": []})
+            "muscle": muscle_label(r["muscle"]), "unit": "min" if timed else "kg",
+            "points": []})
         entry["points"].append((r["d"], value))
     return out
 
@@ -933,17 +978,19 @@ def cmd_panel(args, cfg, db):
     # Completed sets per muscle over the trailing 8 weeks -- recent enough to
     # say something about current training, long enough to be stable.
     since = (datetime.now() - timedelta(weeks=8)).date().isoformat()
-    out["muscles"] = [
-        {"muscle": r["muscle"] or "?", "sets": r["s"]}
-        for r in db.execute(
-            "SELECT e.muscle AS muscle, SUM(COALESCE(e.sets_completed, 0)) AS s "
-            "FROM workout_exercises e JOIN workouts w ON w.id = e.workout_id "
-            "WHERE e.done = 1 AND w.ts IS NOT NULL AND date(w.ts) >= ? "
-            "GROUP BY e.muscle ORDER BY s DESC LIMIT 8",
-            (since,),
-        )
-        if r["s"]
-    ]
+    grouped = {}
+    for r in db.execute(
+        "SELECT e.muscle AS muscle, SUM(COALESCE(e.sets_completed, 0)) AS s "
+        "FROM workout_exercises e JOIN workouts w ON w.id = e.workout_id "
+        "WHERE e.done = 1 AND w.ts IS NOT NULL AND date(w.ts) >= ? "
+        "GROUP BY e.muscle", (since,),
+    ):
+        if not r["s"]:
+            continue
+        label = muscle_label(r["muscle"]) or "?"
+        grouped[label] = grouped.get(label, 0) + r["s"]
+    out["muscles"] = [{"muscle": k, "sets": v} for k, v in
+                      sorted(grouped.items(), key=lambda kv: -kv[1])[:8]]
 
     # Trimmed for the popup: the series is capped and the dates dropped, since
     # the tab renders a sparkline and a hover summary, not the full history.
@@ -1065,11 +1112,17 @@ def cmd_stats(args, cfg, db):
     if span["a"]:
         print(f"first / last      : {span['a'][:10]} .. {span['b'][:10]}")
     print("\nby muscle group (completed sets):")
+    grouped = {}
     for r in db.execute(
         "SELECT muscle, SUM(COALESCE(sets_completed, 0)) AS s "
-        "FROM workout_exercises WHERE done = 1 GROUP BY muscle ORDER BY s DESC LIMIT 12"
+        "FROM workout_exercises WHERE done = 1 GROUP BY muscle"
     ):
-        print(f"  {r['muscle'] or '?':<20} {r['s']}")
+        if not r["s"]:
+            continue
+        label = muscle_label(r["muscle"]) or "?"
+        grouped[label] = grouped.get(label, 0) + r["s"]
+    for label, total in sorted(grouped.items(), key=lambda kv: -kv[1])[:12]:
+        print(f"  {label:<20} {total}")
     print("\nmost frequent exercises:")
     for r in db.execute(
         "SELECT name, COUNT(*) AS c FROM workout_exercises WHERE done = 1 "
