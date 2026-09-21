@@ -848,6 +848,50 @@ Panel {
               }
             }
 
+            // Where the PWA is served from. Only matters if you host your own
+            // copy: it is what the ↗ button opens, and the receiver derives
+            // its allowed origin from the same value, so a self-hosted app can
+            // reach the pairing endpoint.
+            Column {
+              width: parent.width
+              spacing: Style.space(4)
+
+              Text {
+                text: root.cfgLabel("appUrl", "GoTrain address")
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              TextField {
+                id: appUrlField
+                width: parent.width
+                text: root.cfgValue("appUrl", "https://niclick.org/GoTrain")
+                foreground: root.foreground
+                font.family: root.fontFamily
+                Keys.onPressed: function(event) {
+                  if (event.key === Qt.Key_Escape) {
+                    text = root.cfgValue("appUrl", "https://niclick.org/GoTrain")
+                    root.endEditing()
+                    event.accepted = true
+                  } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    root.saveConfig("appUrl", text)
+                    root.endEditing()
+                    event.accepted = true
+                  }
+                }
+              }
+
+              Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "Leave empty for niclick.org/GoTrain"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
             Text {
               width: parent.width
               wrapMode: Text.WordWrap

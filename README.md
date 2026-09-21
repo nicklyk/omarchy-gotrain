@@ -114,7 +114,7 @@ the same way in minutes.
 
 ## Settings
 
-The popup has two tabs. **Settings** covers everything worth tuning:
+The popup has three tabs. **Settings** covers everything worth tuning:
 
 | Setting | Effect | Stored in |
 |---|---|---|
@@ -123,6 +123,14 @@ The popup has two tabs. **Settings** covers everything worth tuning:
 | Pairing port | Port `gotrain pair` listens on | `config.json` |
 | Pairing window | How long `pair` waits before giving up | `config.json` |
 | Drop folder | Where `gotrain sync` looks for exports | `config.json` |
+| GoTrain address | Where your copy of the PWA is served from | `config.json` |
+
+**GoTrain address** only matters if you host the app yourself. It is what the
+↗ button in the Overview tab opens, and the pairing receiver derives its
+allowed origin from the same value — so a self-hosted copy can reach the
+endpoint instead of being turned away for coming from the wrong site. A bare
+host is fine (`gym.example.com/gotrain` becomes `https://gym.example.com/gotrain`),
+and leaving the field empty puts it back to `https://niclick.org/GoTrain`.
 
 Appearance lives on the bar entry, because it is presentation and applies the
 moment you click. Everything else lives in the CLI config so a terminal
@@ -135,6 +143,8 @@ The same settings from a terminal:
 gotrain config list
 gotrain config set staleDays 5
 gotrain config get port
+gotrain config set appUrl https://gym.example.com/gotrain
+gotrain config set appUrl ''          # back to the default
 ```
 
 `config set` validates ranges and rejects unknown keys, and only writes what

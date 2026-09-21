@@ -168,6 +168,14 @@ def die(msg: str, code: int = 1):
     raise SystemExit(code)
 
 
+def origin_of(url: str) -> str:
+    """Scheme and host of `url`, for the receiver's CORS header."""
+    parsed = urllib.parse.urlparse(url or "")
+    if parsed.scheme in ("http", "https") and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return DEFAULT_CONFIG["origin"]
+
+
 def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
     if CONFIG_PATH.exists():
@@ -175,6 +183,12 @@ def load_config() -> dict:
             cfg.update(json.loads(CONFIG_PATH.read_text()))
         except (OSError, json.JSONDecodeError) as e:
             print(f"{APP}: ignoring bad config {CONFIG_PATH}: {e}", file=sys.stderr)
+    # `origin` is not a setting of its own: it has to be whatever host appUrl
+    # points at. Two separate values could disagree, and the receiver would
+    # then send an Access-Control-Allow-Origin for a site the app is not
+    # served from -- which fails only for people self-hosting, the one group
+    # that needs this to work.
+    cfg["origin"] = origin_of(cfg.get("appUrl"))
     return cfg
 
 
@@ -860,6 +874,8 @@ EDITABLE = {
                     "label": "Pairing window (seconds)"},
     "watchDir":    {"type": "path",
                     "label": "Drop folder"},
+    "appUrl":      {"type": "url",
+                    "label": "GoTrain address"},
 }
 
 
@@ -901,6 +917,20 @@ def config_set(key: str, raw: str):
         if lo is not None and value < lo or hi is not None and value > hi:
             die(f"{key} must be between {lo} and {hi}, got {value}")
         store_key, store_value = key, value
+    elif spec["type"] == "url":
+        text = str(raw).strip()
+        if not text:
+            # Blank means "back to the default". It is the only way to clear a
+            # custom address from the panel, where there is nothing to delete
+            # a setting with.
+            store_key, store_value = key, DEFAULT_CONFIG[key]
+        else:
+            if "://" not in text:
+                text = "https://" + text
+            parsed = urllib.parse.urlparse(text)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                die(f"{key} must be an http or https address, got '{raw}'")
+            store_key, store_value = key, text.rstrip("/")
     else:
         text = str(raw).strip()
         if not text:
