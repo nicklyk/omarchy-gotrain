@@ -21,10 +21,16 @@ network traffic. You move the data when you want to.
 GoTrain has no server, so "sync" means getting `tp4_state` off the phone.
 Three routes, in the order you will probably want them:
 
-**Share sheet.** In GoTrain: Settings → Data → *Send to PC*. Pick LocalSend
-(or AirDrop) and send it here. Then `gotrain sync`, or the ⤓ button in the
-panel, picks up the newest export from `~/Downloads`. Encrypted, no size
-limit, and nothing to set up beyond LocalSend on both ends.
+**Export, then share.** In GoTrain: Settings → Data → *Export*, which writes a
+`.json` onto the phone. Share that file with LocalSend (or AirDrop) and send it
+here; `gotrain sync`, or the ⤓ button in the panel, then picks up the newest
+export from `~/Downloads`. Encrypted, no size limit, and nothing to set up
+beyond LocalSend on both ends.
+
+Two steps rather than one because iOS will not offer LocalSend for a `.json`
+handed to it by a web share sheet. The app used to have a *Send to PC* button
+that tried; the file had to be saved to the phone first regardless, so the
+button was removed rather than left as a dead end.
 
 **Pairing code.** Run `gotrain pair` (or the QR button in the panel). It
 prints a QR code and listens on your LAN for one transfer, then exits. In
@@ -33,8 +39,8 @@ workout this machine already holds, so a routine sync sends only what
 changed — a single workout is well under a kilobyte.
 
 Worth knowing: that transfer is plain HTTP across your local network. Anyone
-on the same Wi-Fi could read it. The share sheet route is encrypted; prefer it
-when you have the choice.
+on the same Wi-Fi could read it. Sharing the export with LocalSend is
+encrypted; prefer that when you have the choice.
 
 **A file.** `gotrain import path/to/export.json` takes whatever arrives by any
 other means — a cable, an email to yourself, a browser download.
@@ -58,7 +64,7 @@ Nothing listens on the port except during the few minutes `gotrain pair` is
 running, and the receiver wants a 128-bit token and serves exactly one
 transfer, so an idle open port simply refuses connections.
 
-The share sheet route needs no rule of its own — LocalSend's port is already
+Sharing an export needs no rule of its own — LocalSend's port is already
 open.
 
 ## Commands
