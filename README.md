@@ -162,6 +162,26 @@ omarchy-shell nicklyk.gotrain settings     # open straight to the Settings tab
 omarchy-shell nicklyk.gotrain toggleDays   # show/hide the day count
 ```
 
+## Tests
+
+```bash
+tests/run
+```
+
+Covers import and merge, progression figures against a fixture with known
+numbers, personal-record detection including the first-import guard, the panel
+payload (with an empty archive as well as a full one), config validation, and
+that the receiver's allowed origin follows the configured address. It also
+checks the manifest, that the CLI survives a clone executable, and that the QML
+parses.
+
+Every test runs against a throwaway `XDG_DATA_HOME`, so it never reads or
+writes the real archive. It starts no servers, touches no firewall rules and
+does not talk to the running shell -- safe to run on the machine you use.
+
+Checks are written to fail when the behaviour breaks, not merely to pass today:
+each one was confirmed by breaking the code under it and watching it go red.
+
 ## Where things live
 
 ```

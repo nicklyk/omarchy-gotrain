@@ -1,0 +1,215 @@
+{
+ "schema": 3,
+ "globalPauseSecs": 75,
+ "lang": "en",
+ "activePlanId": "p1",
+ "plans": [
+  {
+   "id": "p1",
+   "name": "Test Plan",
+   "phases": [
+    {
+     "id": "ph1",
+     "name": "Session",
+     "colorIdx": 0
+    }
+   ],
+   "exercises": [
+    {
+     "id": "e1",
+     "phaseId": "ph1",
+     "icon": "💪",
+     "name": "Bench Press",
+     "muscle": "chest",
+     "type": "reps",
+     "sets": 3,
+     "reps": "10",
+     "sithoehe": "",
+     "kg": "60",
+     "pauseSecs": null,
+     "durationSecs": 300,
+     "note": ""
+    },
+    {
+     "id": "e2",
+     "phaseId": "ph1",
+     "icon": "⚡",
+     "name": "Triceps Pushdown",
+     "muscle": "triceps",
+     "type": "reps",
+     "sets": 3,
+     "reps": "10",
+     "sithoehe": "",
+     "kg": "25",
+     "pauseSecs": null,
+     "durationSecs": 300,
+     "note": ""
+    },
+    {
+     "id": "e3",
+     "phaseId": "ph1",
+     "icon": "🚣",
+     "name": "Rowing Machine",
+     "muscle": "cardio",
+     "type": "time",
+     "sets": 1,
+     "reps": "",
+     "sithoehe": "",
+     "kg": "",
+     "pauseSecs": null,
+     "durationSecs": 480,
+     "note": ""
+    }
+   ]
+  }
+ ],
+ "globalExercises": [],
+ "progress": {},
+ "history": [
+  {
+   "id": "w4",
+   "ts": "2026-08-22T18:00:00",
+   "plan": "Test Plan",
+   "planId": "p1",
+   "totalExercises": 3,
+   "doneExercises": 3,
+   "totalSets": 7,
+   "exercises": [
+    {
+     "id": "e1",
+     "icon": "💪",
+     "name": "Bench Press",
+     "muscle": "chest",
+     "type": "reps",
+     "sets": 3,
+     "reps": "10",
+     "setsCompleted": 3,
+     "done": true,
+     "kg": "65"
+    },
+    {
+     "id": "e2",
+     "icon": "⚡",
+     "name": "Triceps Pushdown",
+     "muscle": "triceps",
+     "type": "reps",
+     "sets": 3,
+     "reps": "10",
+     "setsCompleted": 3,
+     "done": true,
+     "kg": "25"
+    },
+    {
+     "id": "e3",
+     "icon": "🚣",
+     "name": "Rowing Machine",
+     "muscle": "cardio",
+     "type": "time",
+     "sets": 1,
+     "reps": "",
+     "setsCompleted": 3,
+     "done": true,
+     "durationMin": "8",
+     "durationSecs": 480
+    }
+   ]
+  },
+  {
+   "id": "w3",
+   "ts": "2026-08-15T18:00:00",
+   "plan": "Test Plan",
+   "planId": "p1",
+   "totalExercises": 3,
+   "doneExercises": 3,
+   "totalSets": 7,
+   "exercises": [
+    {
+     "id": "e1",
+     "icon": "💪",
+     "name": "Bench Press",
+     "muscle": "chest",
+     "type": "reps",
+     "sets": 3,
+     "reps": "10",
+     "setsCompleted": 3,
+     "done": true,
+     "kg": "60"
+    },
+    {
+     "id": "e2",
+     "icon": "⚡",
+     "name": "Triceps Pushdown",
+     "muscle": "triceps",
+     "type": "reps",
+     "sets": 3,
+     "reps": "10",
+     "setsCompleted": 3,
+     "done": true,
+     "kg": "25"
+    },
+    {
+     "id": "e3",
+     "icon": "🚣",
+     "name": "Rowing Machine",
+     "muscle": "cardio",
+     "type": "time",
+     "sets": 1,
+     "reps": "",
+     "setsCompleted": 3,
+     "done": true,
+     "durationMin": "8",
+     "durationSecs": 480
+    }
+   ]
+  },
+  {
+   "id": "w2",
+   "ts": "2026-08-08T18:00:00",
+   "plan": "Test Plan",
+   "planId": "p1",
+   "totalExercises": 3,
+   "doneExercises": 3,
+   "totalSets": 7,
+   "exercises": [
+    {
+     "id": "e1",
+     "icon": "💪",
+     "name": "Bench Press",
+     "muscle": "chest",
+     "type": "reps",
+     "sets": 3,
+     "reps": "10",
+     "setsCompleted": 3,
+     "done": true,
+     "kg": "55"
+    },
+    {
+     "id": "e2",
+     "icon": "⚡",
+     "name": "Triceps Pushdown",
+     "muscle": "triceps",
+     "type": "reps",
+     "sets": 3,
+     "reps": "10",
+     "setsCompleted": 3,
+     "done": true,
+     "kg": "30"
+    },
+    {
+     "id": "e3",
+     "icon": "🚣",
+     "name": "Rowing Machine",
+     "muscle": "cardio",
+     "type": "time",
+     "sets": 1,
+     "reps": "",
+     "setsCompleted": 3,
+     "done": true,
+     "durationMin": "8",
+     "durationSecs": 480
+    }
+   ]
+  }
+ ],
+ "kind": "full"
+}

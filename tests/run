@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""Regression tests for the GoTrain plugin.
+
+Run with no arguments:  tests/run
+
+Every test gets its own throwaway XDG_DATA_HOME and XDG_CONFIG_HOME, so the
+suite never reads or writes the real archive at ~/.local/share/gotrain. It
+starts no servers, touches no firewall rules and does not talk to the running
+shell -- it is safe to run at any time, on the machine you actually use.
+
+Stdlib only, matching the CLI it tests.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+PLUGIN = Path(__file__).resolve().parent.parent
+CLI = PLUGIN / "bin" / "gotrain"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+passed = 0
+failures = []
+
+
+def check(name, got, want):
+    global passed
+    if got == want:
+        passed += 1
+        print(f"  ok   {name}")
+    else:
+        failures.append(f"{name}\n       got  {got!r}\n       want {want!r}")
+        print(f"  FAIL {name}\n       got  {got!r}\n       want {want!r}")
+
+
+def check_that(name, ok, detail=""):
+    check(name, bool(ok) or detail or False, True)
+
+
+class Sandbox:
+    """A throwaway archive. The guard is not decoration: a bug here would run
+    the whole suite against the user's real training data."""
+
+    def __enter__(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="gotrain-test-"))
+        self.env = dict(os.environ)
+        self.env["XDG_DATA_HOME"] = str(self.dir / "data")
+        self.env["XDG_CONFIG_HOME"] = str(self.dir / "config")
+        assert str(self.dir).startswith(tempfile.gettempdir())
+        return self
+
+    def __exit__(self, *_):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def run(self, *args):
+        return subprocess.run([str(CLI), *args], env=self.env,
+                              capture_output=True, text=True)
+
+    def out(self, *args):
+        return self.run(*args).stdout.strip()
+
+    def json(self, *args):
+        return json.loads(self.run(*args).stdout)
+
+    @property
+    def config_file(self):
+        return self.dir / "config" / "gotrain" / "config.json"
+
+
+def fixture(name):
+    return str(FIXTURES / name)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+def test_import_and_merge():
+    print("\nimport and merge")
+    with Sandbox() as s:
+        check("first import reports 3 new",
+              "3 new of 3 workouts" in s.out("import", fixture("baseline.json")), True)
+        check("archive holds 3", s.json("panel")["totalWorkouts"], 3)
+
+        # Re-importing the same export must not duplicate anything. This is the
+        # whole basis of "sync whenever you like".
+        again = s.out("import", fixture("baseline.json"))
+        check("re-import is a no-op", "already imported" in again, True)
+        check("still 3 after re-import", s.json("panel")["totalWorkouts"], 3)
+
+        # A later export merges rather than replaces.
+        s.run("import", fixture("pr.json"))
+        check("merging a later export adds one", s.json("panel")["totalWorkouts"], 4)
+
+    with Sandbox() as s:
+        # The normal case, and the one that actually bites: a fresh full export
+        # repeats workouts the archive already has. Only the new one may land.
+        # File-level deduplication does not cover this -- the file differs.
+        s.run("import", fixture("baseline.json"))
+        out = s.out("import", fixture("overlap.json"))
+        check("an overlapping export reports only what is new",
+              "1 new of 3 workouts" in out, True)
+        check("overlapping workouts are not duplicated",
+              s.json("panel")["totalWorkouts"], 4)
+        ids = [w["id"] for w in s.json("panel")["recent"]]
+        check("every workout appears once", sorted(ids), ["w1", "w2", "w3", "w4"])
+
+
+def test_progress_numbers():
+    print("\nprogress and records")
+    with Sandbox() as s:
+        s.run("import", fixture("baseline.json"))
+        rows = {r["name"]: r for r in s.json("progress", "--json")}
+
+        # Bench rises 50 -> 55 -> 60, Triceps falls 30 -> 30 -> 25, Rowing flat.
+        check("bench current", rows["Bench Press"]["current"], 60.0)
+        check("bench best", rows["Bench Press"]["best"], 60.0)
+        check("bench change", rows["Bench Press"]["change"], 10.0)
+        check("bench series", rows["Bench Press"]["series"], [50.0, 55.0, 60.0])
+        check("bench at personal best", rows["Bench Press"]["atBest"], True)
+
+        check("a regression is negative", rows["Triceps Pushdown"]["change"], -5.0)
+        check("regression is not at best", rows["Triceps Pushdown"]["atBest"], False)
+
+        # A timed exercise progresses in minutes, not kilos.
+        check("timed exercise unit", rows["Rowing Machine"]["unit"], "min")
+        check("flat exercise change", rows["Rowing Machine"]["change"], 0.0)
+
+        recs = {r["name"]: r for r in s.json("records", "--json")}
+        check("record is the best ever, not the latest",
+              recs["Triceps Pushdown"]["best"], 30.0)
+        check("record keeps the date it was first reached",
+              recs["Triceps Pushdown"]["date"], "2026-08-01")
+        check("bench record date", recs["Bench Press"]["date"], "2026-08-15")
+
+
+def test_personal_records():
+    print("\npersonal record detection")
+    with Sandbox() as s:
+        s.run("import", fixture("baseline.json"))
+        out = s.out("import", fixture("pr.json"))
+        check("a heavier lift is announced", "Bench Press" in out and "65" in out, True)
+
+    with Sandbox() as s:
+        # The guard that matters: a first import must not declare every
+        # exercise a personal record and fire a wall of noise.
+        out = s.out("import", fixture("pr.json"))
+        check("first import announces no records", "PR" in out, False)
+
+
+def test_panel_shape():
+    print("\npanel payload")
+    with Sandbox() as s:
+        s.run("import", fixture("baseline.json"))
+        d = s.json("panel")
+        for key in ("hasData", "totalWorkouts", "daysSince", "recent", "muscles",
+                    "progress", "config", "appUrl", "staleDays", "watchDirs"):
+            check(f"panel has {key}", key in d, True)
+        check("panel reports data", d["hasData"], True)
+        check("recent is newest first",
+              [r["id"] for r in d["recent"]][:3], ["w3", "w2", "w1"])
+
+    with Sandbox() as s:
+        # First run, before anything is imported. The panel renders this, so a
+        # crash here is the worst first impression the plugin could make.
+        d = s.json("panel")
+        check("empty archive still returns a payload", d["hasData"], False)
+        check("empty recent", d["recent"], [])
+        check("empty progress", d["progress"], [])
+        check("empty muscles", d["muscles"], [])
+        check("status exits cleanly when empty", s.run("status").returncode, 0)
+        check("progress --json is [] when empty", s.json("progress", "--json"), [])
+
+
+def test_config_validation():
+    print("\nconfig")
+    with Sandbox() as s:
+        view = s.json("config", "list", "--json")
+        check("five editable settings", sorted(view),
+              ["appUrl", "pairTimeout", "port", "staleDays", "watchDir"])
+        check("all start at their defaults",
+              all(v["default"] for v in view.values()), True)
+        check("no file until something is set", s.config_file.exists(), False)
+
+        check("rejects an unknown key", s.run("config", "set", "nope", "1").returncode, 1)
+        check("rejects a non-number", s.run("config", "set", "port", "abc").returncode, 1)
+        check("rejects a port below the range",
+              s.run("config", "set", "port", "80").returncode, 1)
+        check("rejects a port above the range",
+              s.run("config", "set", "port", "99999").returncode, 1)
+        check("accepts a port in range",
+              s.run("config", "set", "port", "9000").returncode, 0)
+        check("the value is read back", s.out("config", "get", "port"), "9000")
+
+        # Only non-defaults are written, so an untouched install has no file.
+        s.run("config", "set", "port", "8765")
+        check("setting a value back to its default drops the override",
+              json.loads(s.config_file.read_text()), {})
+
+
+def test_app_url():
+    print("\nGoTrain address")
+    with Sandbox() as s:
+        check("defaults to the public copy",
+              s.out("config", "get", "appUrl"), "https://niclick.org/GoTrain")
+
+        s.run("config", "set", "appUrl", "gym.example.com/app/")
+        check("a bare host gains a scheme and loses the trailing slash",
+              s.out("config", "get", "appUrl"), "https://gym.example.com/app")
+        check("the panel serves the configured address",
+              s.json("panel")["appUrl"], "https://gym.example.com/app")
+
+        check("rejects a non-http scheme",
+              s.run("config", "set", "appUrl", "ftp://nope").returncode, 1)
+
+        # Blank is the only way to clear it from the panel's text field.
+        s.run("config", "set", "appUrl", "")
+        check("blank restores the default",
+              s.out("config", "get", "appUrl"), "https://niclick.org/GoTrain")
+        check("and removes the override",
+              json.loads(s.config_file.read_text()), {})
+
+
+LOAD_CFG = """
+import importlib.util, sys, json
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("gotrain_cli", %r)
+mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("gotrain_cli", loader))
+sys.argv = ["gotrain"]
+loader.exec_module(mod)
+print(json.dumps({"origin": mod.load_config()["origin"],
+                  "probe": {u: mod.origin_of(u) for u in %r}}))
+"""
+
+
+def load_config_in(sandbox, probes=()):
+    """Import the CLI inside the sandbox and report what load_config() built.
+    Calling origin_of() alone would pass even if nothing wired it up."""
+    code = LOAD_CFG % (str(CLI), list(probes))
+    r = subprocess.run([sys.executable, "-c", code], env=sandbox.env,
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return {"origin": f"<crashed: {r.stderr.strip()[:120]}>", "probe": {}}
+    return json.loads(r.stdout)
+
+
+def test_origin_follows_app_url():
+    print("\nreceiver origin")
+    # `origin` is not a setting of its own -- it has to track appUrl, or the
+    # pairing receiver allows an origin the app is not served from, which
+    # breaks precisely the self-hosters the setting exists for.
+    with Sandbox() as s:
+        probes = ["https://niclick.org/GoTrain", "http://192.168.1.50:8080/gotrain",
+                  "https://gym.example.com/app", "nonsense", ""]
+        got = load_config_in(s, probes)["probe"]
+        check("origin of the default", got["https://niclick.org/GoTrain"],
+              "https://niclick.org")
+        check("origin keeps a port", got["http://192.168.1.50:8080/gotrain"],
+              "http://192.168.1.50:8080")
+        check("origin of a custom host", got["https://gym.example.com/app"],
+              "https://gym.example.com")
+        check("nonsense falls back rather than emitting a broken header",
+              got["nonsense"], "https://niclick.org")
+        check("empty falls back", got[""], "https://niclick.org")
+
+        # The wiring, not just the helper: a config with a custom address must
+        # come out of load_config() with a matching origin.
+        check("default config yields the default origin",
+              load_config_in(s)["origin"], "https://niclick.org")
+        s.run("config", "set", "appUrl", "https://gym.example.com/app")
+        check("a configured address moves the origin with it",
+              load_config_in(s)["origin"], "https://gym.example.com")
+        s.run("config", "set", "appUrl", "http://192.168.1.50:8080/gotrain")
+        check("including scheme and port",
+              load_config_in(s)["origin"], "http://192.168.1.50:8080")
+
+
+def test_packaging():
+    print("\npackaging")
+    manifest = json.loads((PLUGIN / "manifest.json").read_text())
+    check("plugin id", manifest["id"], "nicklyk.gotrain")
+    # A string here is rejected by the loader, and the failure is silent.
+    check("schemaVersion is a JSON number",
+          isinstance(manifest["schemaVersion"], int), True)
+    check("id does not claim to be first-party",
+          manifest["id"].startswith("omarchy."), False)
+
+    entry = manifest["entryPoints"]["barWidget"]
+    check("the bar widget entry point exists", (PLUGIN / entry).is_file(), True)
+    check("the CLI is executable after a clone",
+          os.access(CLI, os.X_OK), True)
+    # omarchy-plugin-validate rejects symlinks inside a plugin directory.
+    check("no symlinks in the tree",
+          [str(p.relative_to(PLUGIN)) for p in PLUGIN.rglob("*")
+           if p.is_symlink() and ".git" not in p.parts], [])
+
+    validate = shutil.which("omarchy-plugin-validate")
+    if validate:
+        r = subprocess.run([validate, str(PLUGIN)], capture_output=True, text=True)
+        check("omarchy-plugin-validate passes", r.returncode, 0)
+    else:
+        print("  skip omarchy-plugin-validate (not installed)")
+
+
+def qmllint_handles_typed_functions(qmllint):
+    """Qt 6.11.2's qmllint exits 255 with no diagnostic at all on a typed
+    function declaration -- `function f(): void {}` -- which is valid QML and
+    the form Quickshell's IpcHandler requires. Probe for it rather than
+    reporting our own files as broken, and rather than dropping the check:
+    when a future Qt fixes this, the check starts running again by itself.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        probe = Path(d) / "Probe.qml"
+        probe.write_text("import QtQuick\nItem {\n  function f(): void { }\n}\n")
+        return subprocess.run([qmllint, str(probe)],
+                              capture_output=True).returncode == 0
+
+
+def test_qml_parses():
+    print("\nQML")
+    qmllint = shutil.which("qmllint")
+    if not qmllint:
+        print("  skip qmllint (not installed)")
+        return
+    typed_ok = qmllint_handles_typed_functions(qmllint)
+    for name in ("Panel.qml", "BarWidget.qml"):
+        source = (PLUGIN / name).read_text()
+        if "): void" in source and not typed_ok:
+            print(f"  skip {name} (this qmllint build cannot parse typed functions)")
+            continue
+        r = subprocess.run([qmllint, str(PLUGIN / name)], capture_output=True, text=True)
+        check(f"{name} parses", r.returncode, 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+def main():
+    if not CLI.is_file():
+        sys.exit(f"cannot find the CLI at {CLI}")
+
+    for test in (test_import_and_merge, test_progress_numbers, test_personal_records,
+                 test_panel_shape, test_config_validation, test_app_url,
+                 test_origin_follows_app_url, test_packaging, test_qml_parses):
+        test()
+
+    print(f"\n{passed} passed, {len(failures)} failed")
+    if failures:
+        print("\nfailures:")
+        for f in failures:
+            print(f"  {f}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
