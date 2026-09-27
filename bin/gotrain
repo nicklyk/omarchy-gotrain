@@ -489,6 +489,10 @@ def ingest(db, state: dict, *, source: str, kind: str = "full", raw: bytes | Non
             "lang": state.get("lang", "en"),
             "activePlanId": state.get("activePlanId"),
             "progress": state.get("progress", {}),
+            # Kept so `export` can hand it back. An export that does not say
+            # which schema it is written in makes the app guess, and guessing
+            # wrong in the optimistic direction loses data silently.
+            "schema": state.get("schema"),
         }, ensure_ascii=False))
 
     db.execute(
@@ -744,7 +748,16 @@ def build_state(db) -> dict:
             entry["ts"] = w["ts"]
         history.append(entry)
 
+    # An export with no schema makes GoTrain fall back to the oldest one and
+    # re-run every migration. That is the safe direction: re-running them on
+    # current data is a no-op, whereas claiming a schema newer than the data
+    # really is makes the app skip migrations it needed, and the loss is
+    # silent and permanent. So when the archive never saw a schema -- it was
+    # built from an export written before the field existed -- say 1 and let
+    # the app do the work, rather than assuming the data is current.
+    schema = scalars.get("schema")
     return {
+        "schema": schema if isinstance(schema, int) and schema > 0 else 1,
         "globalPauseSecs": scalars.get("globalPauseSecs", 75),
         "lang": scalars.get("lang", "en"),
         "activePlanId": scalars.get("activePlanId") or (plans[0]["id"] if plans else None),

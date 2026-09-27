@@ -245,6 +245,39 @@ def load_config_in(sandbox, probes=()):
     return json.loads(r.stdout)
 
 
+def test_export_states_its_schema():
+    print("\nexport schema")
+    with Sandbox() as s:
+        s.run("import", fixture("baseline.json"))
+        out = s.json("export")
+        # Without this the app cannot tell how old the data is, keeps whatever
+        # schema it is already running, and skips migrations it needed.
+        check("an export says which schema it is", out.get("schema"), 3)
+
+    with Sandbox() as s:
+        # An archive built from an export written before the schema field
+        # existed. The honest answer is "the oldest", so the app re-runs every
+        # migration -- a no-op on current data, and a repair on old data.
+        import json as _json
+        old_export = _json.loads(Path(fixture("baseline.json")).read_text())
+        del old_export["schema"]
+        path = s.dir / "schemaless.json"
+        path.write_text(_json.dumps(old_export))
+        s.run("import", str(path))
+        check("an unknown schema is reported as the oldest, not the newest",
+              s.json("export").get("schema"), 1)
+
+    with Sandbox() as s:
+        # The round trip has to preserve it rather than stamp a constant.
+        import json as _json
+        two = _json.loads(Path(fixture("baseline.json")).read_text())
+        two["schema"] = 2
+        path = s.dir / "schema2.json"
+        path.write_text(_json.dumps(two))
+        s.run("import", str(path))
+        check("a known schema round-trips unchanged", s.json("export").get("schema"), 2)
+
+
 def test_origin_follows_app_url():
     print("\nreceiver origin")
     # `origin` is not a setting of its own -- it has to track appUrl, or the
@@ -340,7 +373,8 @@ def main():
 
     for test in (test_import_and_merge, test_progress_numbers, test_personal_records,
                  test_panel_shape, test_config_validation, test_app_url,
-                 test_origin_follows_app_url, test_packaging, test_qml_parses):
+                 test_export_states_its_schema, test_origin_follows_app_url,
+                 test_packaging, test_qml_parses):
         test()
 
     print(f"\n{passed} passed, {len(failures)} failed")
