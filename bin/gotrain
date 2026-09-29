@@ -723,6 +723,22 @@ def compute_status(db, cfg) -> dict:
     return out
 
 
+def _premigration(ex) -> bool:
+    """True if GoTrain's migrations would still change this exercise.
+
+    Mirrors the conditions under which migrateMuscles and migrateDurations
+    touch an entry. Both skip anything already migrated, so answering True
+    too often costs nothing; answering False too often loses data.
+    """
+    if not isinstance(ex, dict):
+        return False
+    muscle = ex.get("muscle")
+    if muscle is not None and muscle_key(muscle) != muscle:
+        return True
+    return ex.get("durationSecs") is None and (
+        ex.get("durationMin") is not None or ex.get("type") == "time")
+
+
 def build_state(db) -> dict:
     """Reconstruct a merged tp4_state, importable back into GoTrain."""
     scalars = json.loads(meta_get(db, "state_scalars", "{}") or "{}")
@@ -756,8 +772,16 @@ def build_state(db) -> dict:
     # built from an export written before the field existed -- say 1 and let
     # the app do the work, rather than assuming the data is current.
     schema = scalars.get("schema")
+    schema = schema if isinstance(schema, int) and schema > 0 else 1
+    # The recorded schema is that of the latest full export, but history is
+    # merged and a workout keeps the form it was first seen in. An archive
+    # started from an old export still holds those rows unmigrated, and a
+    # later current export does not rewrite them. Stating the newer schema
+    # over them would make the app skip the migrations they still need.
+    if schema > 1 and any(_premigration(ex) for w in history for ex in w["exercises"]):
+        schema = 1
     return {
-        "schema": schema if isinstance(schema, int) and schema > 0 else 1,
+        "schema": schema,
         "globalPauseSecs": scalars.get("globalPauseSecs", 75),
         "lang": scalars.get("lang", "en"),
         "activePlanId": scalars.get("activePlanId") or (plans[0]["id"] if plans else None),

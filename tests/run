@@ -277,6 +277,48 @@ def test_export_states_its_schema():
         s.run("import", str(path))
         check("a known schema round-trips unchanged", s.json("export").get("schema"), 2)
 
+    with Sandbox() as s:
+        # An archive started from an old export, then fed a current one. The
+        # old workout stays as it was first seen -- a German label, a range
+        # for a duration -- so the export must not claim the newer schema
+        # over it, or the app skips the migrations that row still needs.
+        import json as _json
+        old = _json.loads(Path(fixture("baseline.json")).read_text())
+        del old["schema"]
+        old["history"] = [{
+            "id": "old1", "ts": "2026-06-01T18:00:00", "plan": "Alt", "planId": "p1",
+            "exercises": [
+                {"id": "x1", "name": "Rudern", "muscle": "Rücken", "type": "reps",
+                 "sets": 3, "reps": "10", "kg": "40"},
+                {"id": "x2", "name": "Laufband", "muscle": "cardio", "type": "time",
+                 "sets": 1, "durationMin": "20-30"},
+            ],
+        }]
+        path = s.dir / "old.json"
+        path.write_text(_json.dumps(old))
+        s.run("import", str(path))
+        s.run("import", fixture("baseline.json"))
+        check("old rows under a current export are reported as the oldest schema",
+              s.json("export").get("schema"), 1)
+
+    with Sandbox() as s:
+        # The same, with only the duration unmigrated: a key-only archive can
+        # still predate durationSecs.
+        import json as _json
+        old = _json.loads(Path(fixture("baseline.json")).read_text())
+        del old["schema"]
+        old["history"] = [{
+            "id": "old2", "ts": "2026-06-01T18:00:00", "plan": "Alt", "planId": "p1",
+            "exercises": [{"id": "x2", "name": "Row", "muscle": "cardio",
+                           "type": "time", "sets": 1, "durationMin": "8"}],
+        }]
+        path = s.dir / "old.json"
+        path.write_text(_json.dumps(old))
+        s.run("import", str(path))
+        s.run("import", fixture("baseline.json"))
+        check("an unmigrated duration alone also lowers the schema",
+              s.json("export").get("schema"), 1)
+
 
 def test_origin_follows_app_url():
     print("\nreceiver origin")
