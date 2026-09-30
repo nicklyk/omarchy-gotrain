@@ -78,6 +78,7 @@ open.
 | `gotrain records` | Best ever load per exercise |
 | `gotrain doctor` | Why the phone cannot reach this machine |
 | `gotrain config list\|get\|set` | Show or change settings |
+| `gotrain today [--json]` | What was done today; exits 1 if nothing, so `&&` works |
 | `gotrain status [--json]` | Days since last workout, this week, total |
 | `gotrain list [-n N]` | Recent workouts |
 | `gotrain show ID` | One workout, exercise by exercise |
