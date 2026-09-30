@@ -84,6 +84,7 @@ open.
 | `gotrain show ID` | One workout, exercise by exercise |
 | `gotrain stats` | Totals, date span, muscle groups, frequent exercises |
 | `gotrain export [-o FILE]` | Write a merged `tp4_state` to load back into GoTrain |
+| `gotrain export --csv [-o FILE]` | One row per exercise per session, for a spreadsheet |
 
 ## Progress
 
