@@ -897,6 +897,34 @@ def find_exports(cfg):
     return sorted(set(hits), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def pending_exports(db, cfg):
+    """Exports in the watch folders this archive has not already taken.
+
+    The count behind the panel's "press Enter to import" was simply how many
+    files were in the folder, so it never cleared: one export sat in
+    ~/Downloads and the nag stayed for weeks after it had been imported.
+
+    Hash the way ingest does -- after decompressing, since that is what it
+    stores -- and skip anything already in snapshots. A file that cannot be
+    read or unpacked is not counted: it cannot be imported either, so nagging
+    about it would recreate the bug in a smaller form.
+    """
+    out = []
+    for path in find_exports(cfg):
+        try:
+            raw = path.read_bytes()
+            if raw[:2] == b"\x1f\x8b":
+                raw = gzip.decompress(raw)
+            digest = hashlib.sha256(raw).hexdigest()
+        except Exception:  # noqa: BLE001 - unreadable means nothing to offer
+            continue
+        if not db.execute(
+            "SELECT 1 FROM snapshots WHERE sha256 = ?", (digest,)
+        ).fetchone():
+            out.append(path)
+    return out
+
+
 def cmd_sync(args, cfg, db):
     found = find_exports(cfg)
     if not found:
@@ -1116,7 +1144,7 @@ def cmd_panel(args, cfg, db):
     ]
     out["config"] = config_view(cfg)
     out["watchDirs"] = [str(Path(d).expanduser()) for d in cfg["watchDirs"]]
-    out["pending"] = len(find_exports(cfg))
+    out["pending"] = len(pending_exports(db, cfg))
     out["appUrl"] = cfg["appUrl"]
     print(json.dumps(out, ensure_ascii=False))
     return 0
@@ -1322,7 +1350,8 @@ def cmd_doctor(args, cfg, db):
     for d in cfg["watchDirs"]:
         path = Path(d).expanduser()
         row("watch folder", str(path),
-            "missing" if not path.is_dir() else f"{len(find_exports(cfg))} export(s) waiting")
+            "missing" if not path.is_dir()
+            else f"{len(pending_exports(db, cfg))} export(s) waiting")
 
     print()
     if problems:

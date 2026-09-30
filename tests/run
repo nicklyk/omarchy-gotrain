@@ -348,6 +348,41 @@ def test_days_bucket_in_local_time():
               s.json("progress", "--json")[0]["lastDate"], "2026-09-27")
 
 
+def test_pending_counts_only_new_exports():
+    print("\npending exports")
+    with Sandbox() as s:
+        import shutil as _sh, gzip as _gz
+        watch = s.dir / "drop"
+        watch.mkdir()
+        s.run("config", "set", "watchDir", str(watch))
+        _sh.copy(fixture("baseline.json"), watch / "gotrain-1.json")
+
+        check("a fresh file is pending", s.json("panel")["pending"], 1)
+        s.run("sync")
+        # The nag used to count files in the folder, so it never cleared: the
+        # same export sat there and the panel kept asking to import it.
+        check("an imported file is no longer pending", s.json("panel")["pending"], 0)
+        s.run("sync")
+        check("and stays cleared after a second sync", s.json("panel")["pending"], 0)
+
+        _sh.copy(fixture("pr.json"), watch / "gotrain-2.json")
+        check("a genuinely new file counts again", s.json("panel")["pending"], 1)
+
+        # Same content, different name: already imported, so not pending.
+        _sh.copy(fixture("baseline.json"), watch / "gotrain-copy.json")
+        check("a renamed copy of an imported export does not count",
+              s.json("panel")["pending"], 1)
+
+        # gzip is hashed after decompressing, the way ingest stores it.
+        (watch / "gotrain-3.json.gz").write_bytes(
+            _gz.compress(Path(fixture("baseline.json")).read_bytes()))
+        check("a gzipped copy of an imported export does not count either",
+              s.json("panel")["pending"], 1)
+
+        (watch / "gotrain-broken.json").write_bytes(b"\x1f\x8b truncated")
+        check("an unreadable file is not nagged about", s.json("panel")["pending"], 1)
+
+
 def test_export_states_its_schema():
     print("\nexport schema")
     with Sandbox() as s:
@@ -577,7 +612,7 @@ def main():
     for test in (test_import_and_merge, test_progress_numbers, test_personal_records,
                  test_panel_shape, test_config_validation, test_app_url,
                  test_sync_all_lets_the_newest_export_win,
-                 test_days_bucket_in_local_time,
+                 test_days_bucket_in_local_time, test_pending_counts_only_new_exports,
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url,
                  test_packaging, test_qml_parses):
