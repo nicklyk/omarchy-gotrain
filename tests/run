@@ -473,6 +473,54 @@ def test_today():
           txt.returncode, 0)
 
 
+def test_export_csv():
+    print("\nexport --csv")
+    import csv as _csv, io as _io, json as _json
+    with Sandbox() as s:
+        s.run("import", fixture("baseline.json"))
+        text = s.out("export", "--csv")
+        rows = list(_csv.reader(_io.StringIO(text)))
+        check("the header names every column", rows[0],
+              ["date", "time", "plan", "exercise", "muscle", "type", "sets",
+               "sets_completed", "reps", "kg", "duration_min", "done"])
+
+        body = rows[1:]
+        exported = s.json("export")
+        expected = sum(len(w["exercises"]) for w in exported["history"])
+        check("one row per exercise per session", len(body), expected)
+        check("which is 3 workouts of 3 exercises here", len(body), 9)
+
+        dates = [r[0] for r in body]
+        check("oldest first, the order a chart reads in", dates, sorted(dates))
+
+        bench = [r for r in body if r[3] == "Bench Press"]
+        check("the load series reads straight across",
+              [r[9] for r in bench], ["50", "55", "60"])
+        rowing = [r for r in body if r[3] == "Rowing Machine"][0]
+        check("an exact duration comes out as minutes", rowing[10], "8")
+        check("a done flag is readable", rowing[11], "yes")
+
+    with Sandbox() as s:
+        # A comma or a quote in a value must stay one cell, or every column
+        # after it shifts and the spreadsheet silently misreads the row.
+        d = _json.loads(Path(fixture("baseline.json")).read_text())
+        d["history"][0]["plan"] = 'Push, "heavy" day'
+        path = s.dir / "q.json"
+        path.write_text(_json.dumps(d))
+        s.run("import", str(path))
+        rows = list(_csv.reader(_io.StringIO(s.out("export", "--csv"))))
+        check("every row keeps its column count", {len(r) for r in rows}, {12})
+        check("a comma and quotes survive in one cell",
+              'Push, "heavy" day' in [r[2] for r in rows], True)
+
+    with Sandbox() as s:
+        s.run("import", fixture("baseline.json"))
+        out = s.dir / "out.csv"
+        r = s.run("export", "--csv", "-o", str(out))
+        check("-o writes the file", out.exists(), True)
+        check("and reports the row count", "9 rows" in r.stdout, True)
+
+
 def test_export_states_its_schema():
     print("\nexport schema")
     with Sandbox() as s:
@@ -703,7 +751,7 @@ def main():
                  test_panel_shape, test_config_validation, test_app_url,
                  test_sync_all_lets_the_newest_export_win,
                  test_days_bucket_in_local_time, test_pending_counts_only_new_exports,
-                 test_a_bad_config_value_does_not_blank_the_bar, test_today,
+                 test_a_bad_config_value_does_not_blank_the_bar, test_today, test_export_csv,
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url,
                  test_packaging, test_qml_parses):

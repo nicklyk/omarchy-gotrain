@@ -30,6 +30,8 @@ and must run with nothing installed.
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import gzip
 import hashlib
 import hmac
@@ -1354,7 +1356,57 @@ def cmd_stats(args, cfg, db):
     return 0
 
 
+CSV_COLUMNS = ["date", "time", "plan", "exercise", "muscle", "type",
+               "sets", "sets_completed", "reps", "kg", "duration_min", "done"]
+
+
+def export_csv(db) -> str:
+    """One row per exercise per session, oldest first.
+
+    The archive is the only place the whole dated series lives, and JSON is
+    the wrong shape for the obvious next step -- opening it in a spreadsheet
+    to draw a graph. Oldest first because that is the order a chart reads in.
+    The csv module does the quoting, so a note-like value with a comma or a
+    quote in it stays one cell.
+    """
+    buf = io.StringIO()
+    out = csv.writer(buf, lineterminator="\n")
+    out.writerow(CSV_COLUMNS)
+    rows = db.execute(
+        "SELECT w.ts, w.plan, e.name, e.muscle, e.type, e.sets, e.sets_completed, "
+        "e.reps, e.kg, e.duration_min, e.done, e.json "
+        "FROM workout_exercises e JOIN workouts w ON w.id = e.workout_id "
+        "ORDER BY (w.ts IS NULL), w.ts, e.idx")
+    for r in rows:
+        local = to_local(r["ts"])
+        # durationSecs is exact where the app recorded it; duration_min is the
+        # older free-text form. Prefer the exact one, as minutes.
+        extra = json.loads(r["json"] or "{}")
+        secs = extra.get("durationSecs")
+        duration = (f"{secs / 60:g}" if isinstance(secs, (int, float))
+                    else (r["duration_min"] or ""))
+        out.writerow([
+            local.strftime("%Y-%m-%d") if local else "",
+            local.strftime("%H:%M") if local else "",
+            r["plan"] or "", r["name"] or "", muscle_label(r["muscle"]) or "",
+            r["type"] or "", r["sets"] if r["sets"] is not None else "",
+            r["sets_completed"] if r["sets_completed"] is not None else "",
+            r["reps"] or "", r["kg"] or "", duration,
+            "yes" if r["done"] else "no",
+        ])
+    return buf.getvalue()
+
+
 def cmd_export(args, cfg, db):
+    if args.csv:
+        text = export_csv(db)
+        if args.output:
+            out = Path(args.output).expanduser()
+            out.write_text(text)
+            print(f"wrote {out} ({text.count(chr(10)) - 1} rows)")
+        else:
+            sys.stdout.write(text)
+        return 0
     state = build_state(db)
     if not state["plans"]:
         die("nothing to export -- no plan library imported yet")
@@ -1900,6 +1952,8 @@ def main(argv=None):
 
     p = sub.add_parser("export", help="write a merged tp4_state for GoTrain to import")
     p.add_argument("-o", "--output")
+    p.add_argument("--csv", action="store_true",
+                   help="one row per exercise per session, for a spreadsheet")
     p.set_defaults(fn=cmd_export)
 
     args = parser.parse_args(argv)
