@@ -22,7 +22,7 @@ archive at `~/.local/share/gotrain/gotrain.db`.
 tests/run
 ```
 
-72 checks. Each runs against a throwaway `XDG_DATA_HOME`, so the suite never
+Each check runs against a throwaway `XDG_DATA_HOME`, so the suite never
 reads or writes the real archive. It starts no servers, touches no firewall
 rules, and never talks to the running shell. `omarchy-plugin-validate` and
 `qmllint` are used when present and skipped with a note when not, so the suite

@@ -808,8 +808,27 @@ def report_import(result, label):
         return False
     print(f"{label}: {result['new']} new of {result['seen']} workouts")
     if result.get("library_kept"):
-        print(f"{label}: has no plans -- kept the archived plan library")
+        print(f"{label}: {KEPT_LIBRARY}")
     return True
+
+
+# Said by every path that imports, pairing included: an export with no plans
+# is usually the wrong iOS container, and a silent "0 new workouts" would hide
+# that the phone's library was ignored.
+KEPT_LIBRARY = "has no plans -- kept the archived plan library"
+
+
+def report_pair(res):
+    """What `pair` prints once a transfer has landed. Separate from cmd_pair so
+    it can be checked without starting the receiver."""
+    if res.get("duplicate"):
+        print("Already had that data -- nothing new.")
+        return 0
+    n = res.get("new", 0)
+    print(f"Received {n} new workout{'s' if n != 1 else ''}.")
+    if res.get("library_kept"):
+        print(f"The transfer {KEPT_LIBRARY}.")
+    return n
 
 
 def after_import(db, cfg, results):
@@ -1681,14 +1700,9 @@ def cmd_pair(args, cfg, db):
         return 130
 
     httpd.shutdown()
-    res = handler.result
-    if res.get("duplicate"):
-        print("Already had that data -- nothing new.")
-    else:
-        n = res.get("new", 0)
-        print(f"Received {n} new workout{'s' if n != 1 else ''}.")
-        if n:
-            notify("GoTrain", f"Imported {n} workout{'s' if n != 1 else ''}")
+    n = report_pair(handler.result)
+    if n:
+        notify("GoTrain", f"Imported {n} workout{'s' if n != 1 else ''}")
     poke_widget()
     return 0
 

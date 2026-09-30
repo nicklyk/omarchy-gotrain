@@ -245,6 +245,24 @@ def load_config_in(sandbox, probes=()):
     return json.loads(r.stdout)
 
 
+PAIR_OUT = """
+import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("gotrain_cli", %r)
+mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("gotrain_cli", loader))
+sys.argv = ["gotrain"]
+loader.exec_module(mod)
+mod.report_pair(%r)
+"""
+
+
+def pair_output_in(sandbox, result):
+    """What `pair` prints for a given ingest result."""
+    r = subprocess.run([sys.executable, "-c", PAIR_OUT % (str(CLI), result)],
+                       env=sandbox.env, capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else f"<crashed: {r.stderr.strip()[:120]}>"
+
+
 def test_export_states_its_schema():
     print("\nexport schema")
     with Sandbox() as s:
@@ -342,6 +360,15 @@ def test_empty_library_does_not_wipe():
         check("the workouts survive", len(state.get("history", [])), 3)
         check("activePlanId still points into the kept library",
               state.get("activePlanId"), "p1")
+
+        # Pairing is the everyday path, so it has to say so too. The receiver
+        # is a server, which the suite never starts; check what cmd_pair prints.
+        kept = pair_output_in(s, {"new": 0, "library_kept": True})
+        check_that("pairing says the library was kept",
+                   "kept the archived plan library" in kept, kept)
+        plain = pair_output_in(s, {"new": 2, "library_kept": False})
+        check_that("pairing stays quiet about it otherwise",
+                   "kept" not in plain and "Received 2 new workouts." in plain, plain)
 
     with Sandbox() as s:
         # An empty archive has nothing to protect: the empty export imports
