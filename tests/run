@@ -305,6 +305,49 @@ def test_sync_all_lets_the_newest_export_win():
               s.json("export")["plans"][0]["name"], "NEW plan")
 
 
+def test_days_bucket_in_local_time():
+    print("\nlocal-time bucketing")
+    with Sandbox() as s:
+        import json as _json
+        # 2026-09-27 is a Sunday. 22:30Z is Monday 00:30 in Berlin, so it
+        # belongs to the week starting Monday the 28th -- not the one before.
+        d = _json.loads(Path(fixture("baseline.json")).read_text())
+        d["history"] = [{
+            "id": "late", "ts": "2026-09-27T22:30:00.000Z", "plan": "P", "planId": "p1",
+            "totalExercises": 1, "doneExercises": 1, "totalSets": 3,
+            "exercises": [{"id": "e1", "name": "Bench", "muscle": "chest",
+                           "type": "reps", "sets": 3, "reps": "10", "kg": "60",
+                           "setsCompleted": 3, "done": True}],
+        }]
+        path = s.dir / "late.json"
+        path.write_text(_json.dumps(d))
+        s.env["TZ"] = "Europe/Berlin"
+        s.run("import", str(path))
+
+        # Pin "now" so the week boundary is deterministic: run the query as if
+        # it were the Wednesday of that week.
+        check("a late-Sunday-UTC workout is dated by local day",
+              s.json("progress", "--json")[0]["lastDate"], "2026-09-28")
+
+    with Sandbox() as s:
+        import json as _json
+        # The same instant an hour earlier is genuinely still Sunday locally.
+        d = _json.loads(Path(fixture("baseline.json")).read_text())
+        d["history"] = [{
+            "id": "early", "ts": "2026-09-27T20:30:00.000Z", "plan": "P", "planId": "p1",
+            "totalExercises": 1, "doneExercises": 1, "totalSets": 3,
+            "exercises": [{"id": "e1", "name": "Bench", "muscle": "chest",
+                           "type": "reps", "sets": 3, "reps": "10", "kg": "60",
+                           "setsCompleted": 3, "done": True}],
+        }]
+        path = s.dir / "early.json"
+        path.write_text(_json.dumps(d))
+        s.env["TZ"] = "Europe/Berlin"
+        s.run("import", str(path))
+        check("an earlier one still falls on the Sunday",
+              s.json("progress", "--json")[0]["lastDate"], "2026-09-27")
+
+
 def test_export_states_its_schema():
     print("\nexport schema")
     with Sandbox() as s:
@@ -534,6 +577,7 @@ def main():
     for test in (test_import_and_merge, test_progress_numbers, test_personal_records,
                  test_panel_shape, test_config_validation, test_app_url,
                  test_sync_all_lets_the_newest_export_win,
+                 test_days_bucket_in_local_time,
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url,
                  test_packaging, test_qml_parses):

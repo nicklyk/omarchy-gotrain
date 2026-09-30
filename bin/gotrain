@@ -298,6 +298,19 @@ def workout_timestamp(entry: dict):
     return parse_legacy_datetime(entry.get("date"), entry.get("time"))
 
 
+def local_date(ts: str | None):
+    """The calendar date a workout falls on where the user lives.
+
+    GoTrain writes ts with toISOString(), so it is UTC. SQLite's date(ts)
+    buckets in UTC too, and every consumer then compares that against a local
+    date -- so a Monday 00:30 Berlin session, stored as Sunday 22:30Z, counted
+    toward the previous week. Bucket here instead: to_local treats a naive
+    timestamp as local, which the older fixture rows rely on.
+    """
+    dt = to_local(ts)
+    return dt.date() if dt else None
+
+
 def to_local(ts: str | None):
     if not ts:
         return None
@@ -611,7 +624,7 @@ def weight(v):
 
 def load_series(db, name=None):
     """{exercise: {muscle, unit, points: [(date, value)]}} oldest first."""
-    sql = ("SELECT e.name, e.muscle, e.type, e.kg, e.duration_min, date(w.ts) d "
+    sql = ("SELECT e.name, e.muscle, e.type, e.kg, e.duration_min, w.ts "
            "FROM workout_exercises e JOIN workouts w ON w.id = e.workout_id "
            "WHERE w.ts IS NOT NULL")
     args = []
@@ -629,7 +642,8 @@ def load_series(db, name=None):
         entry = out.setdefault(r["name"] or "?", {
             "muscle": muscle_label(r["muscle"]), "unit": "min" if timed else "kg",
             "points": []})
-        entry["points"].append((r["d"], value))
+        day = local_date(r["ts"])
+        entry["points"].append((day.isoformat() if day else "?", value))
     return out
 
 
@@ -726,10 +740,10 @@ def compute_status(db, cfg) -> dict:
         out["stale"] = days >= cfg["staleDays"]
 
         monday = today - timedelta(days=today.weekday())
-        out["weekCount"] = db.execute(
-            "SELECT COUNT(*) AS c FROM workouts WHERE ts IS NOT NULL AND date(ts) >= ?",
-            (monday.isoformat(),),
-        ).fetchone()["c"]
+        out["weekCount"] = sum(
+            1 for r in db.execute("SELECT ts FROM workouts WHERE ts IS NOT NULL")
+            if (d := local_date(r["ts"])) and d >= monday
+        )
     return out
 
 
@@ -1079,15 +1093,15 @@ def cmd_panel(args, cfg, db):
 
     # Completed sets per muscle over the trailing 8 weeks -- recent enough to
     # say something about current training, long enough to be stable.
-    since = (datetime.now() - timedelta(weeks=8)).date().isoformat()
+    since = (datetime.now() - timedelta(weeks=8)).date()
     grouped = {}
     for r in db.execute(
-        "SELECT e.muscle AS muscle, SUM(COALESCE(e.sets_completed, 0)) AS s "
+        "SELECT e.muscle AS muscle, COALESCE(e.sets_completed, 0) AS s, w.ts AS ts "
         "FROM workout_exercises e JOIN workouts w ON w.id = e.workout_id "
-        "WHERE e.done = 1 AND w.ts IS NOT NULL AND date(w.ts) >= ? "
-        "GROUP BY e.muscle", (since,),
+        "WHERE e.done = 1 AND w.ts IS NOT NULL",
     ):
-        if not r["s"]:
+        day = local_date(r["ts"])
+        if not r["s"] or not day or day < since:
             continue
         label = muscle_label(r["muscle"]) or "?"
         grouped[label] = grouped.get(label, 0) + r["s"]
