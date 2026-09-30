@@ -245,6 +245,24 @@ def load_config_in(sandbox, probes=()):
     return json.loads(r.stdout)
 
 
+PAIR_OUT = """
+import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("gotrain_cli", %r)
+mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("gotrain_cli", loader))
+sys.argv = ["gotrain"]
+loader.exec_module(mod)
+mod.report_pair(%r)
+"""
+
+
+def pair_output_in(sandbox, result):
+    """What `pair` prints for a given ingest result."""
+    r = subprocess.run([sys.executable, "-c", PAIR_OUT % (str(CLI), result)],
+                       env=sandbox.env, capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else f"<crashed: {r.stderr.strip()[:120]}>"
+
+
 def test_export_states_its_schema():
     print("\nexport schema")
     with Sandbox() as s:
@@ -318,6 +336,64 @@ def test_export_states_its_schema():
         s.run("import", fixture("baseline.json"))
         check("an unmigrated duration alone also lowers the schema",
               s.json("export").get("schema"), 1)
+
+
+def test_empty_library_does_not_wipe():
+    print("\nempty plan library")
+    empty = json.loads(Path(fixture("baseline.json")).read_text())
+    empty.update(plans=[], globalExercises=[], history=[], activePlanId=None)
+
+    with Sandbox() as s:
+        # What the wrong iOS storage container, or a fresh install, exports.
+        # Valid, but taking its library would leave `export` -- the way back
+        # to a working phone -- with nothing to hand over.
+        s.run("import", fixture("baseline.json"))
+        path = s.dir / "empty.json"
+        path.write_text(json.dumps(empty))
+        out = s.out("import", str(path))
+        check_that("importing it says the library was kept",
+                   "kept the archived plan library" in out, out)
+        r = s.run("export")
+        check("export still works afterwards", r.returncode, 0)
+        state = json.loads(r.stdout) if r.returncode == 0 else {}
+        check("the archived plan survives", len(state.get("plans", [])), 1)
+        check("the workouts survive", len(state.get("history", [])), 3)
+        check("activePlanId still points into the kept library",
+              state.get("activePlanId"), "p1")
+
+        # Pairing is the everyday path, so it has to say so too. The receiver
+        # is a server, which the suite never starts; check what cmd_pair prints.
+        kept = pair_output_in(s, {"new": 0, "library_kept": True})
+        check_that("pairing says the library was kept",
+                   "kept the archived plan library" in kept, kept)
+        plain = pair_output_in(s, {"new": 2, "library_kept": False})
+        check_that("pairing stays quiet about it otherwise",
+                   "kept" not in plain and "Received 2 new workouts." in plain, plain)
+
+    with Sandbox() as s:
+        # An empty archive has nothing to protect: the empty export imports
+        # as before, and a later real library replaces it normally.
+        path = s.dir / "empty.json"
+        path.write_text(json.dumps(empty))
+        out = s.out("import", str(path))
+        check("an empty export into an empty archive says nothing extra",
+              "kept" in out, False)
+        s.run("import", fixture("baseline.json"))
+        check("a real library still lands after it",
+              len(s.json("export").get("plans", [])), 1)
+
+    with Sandbox() as s:
+        # A library with plans still replaces the old one wholesale.
+        s.run("import", fixture("baseline.json"))
+        other = json.loads(Path(fixture("baseline.json")).read_text())
+        other["plans"] = [{"id": "p9", "name": "NEW plan name", "phases": []}]
+        other["activePlanId"] = "p9"
+        path = s.dir / "other.json"
+        path.write_text(json.dumps(other))
+        s.run("import", str(path))
+        names = [p.get("name") for p in s.json("export").get("plans", [])]
+        check("a non-empty library still replaces the archived one",
+              names, ["NEW plan name"])
 
 
 def test_origin_follows_app_url():
@@ -415,7 +491,8 @@ def main():
 
     for test in (test_import_and_merge, test_progress_numbers, test_personal_records,
                  test_panel_shape, test_config_validation, test_app_url,
-                 test_export_states_its_schema, test_origin_follows_app_url,
+                 test_export_states_its_schema, test_empty_library_does_not_wipe,
+                 test_origin_follows_app_url,
                  test_packaging, test_qml_parses):
         test()
 

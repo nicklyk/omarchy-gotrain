@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "nicklyk.gotrain",
   "name": "GoTrain",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "author": "Nikolaos Lykouresis",
   "license": "GPL-3.0-or-later",
   "description": "Workout tracking synced from the GoTrain PWA",
