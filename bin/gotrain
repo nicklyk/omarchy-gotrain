@@ -176,6 +176,35 @@ def origin_of(url: str) -> str:
     return DEFAULT_CONFIG["origin"]
 
 
+def sanitise_config(cfg: dict) -> dict:
+    """Replace config values that do not match what EDITABLE declares.
+
+    config.json is meant to be hand-editable, so "staleDays": "3" is an easy
+    slip. It used to reach compute_status as a string and raise a TypeError
+    there, which left the bar widget blank and said nothing about why. A
+    malformed *file* was already ignored with a warning on stderr; a malformed
+    *value* now is too, one line each, falling back to the default.
+    """
+    for key, spec in EDITABLE.items():
+        store = "watchDirs" if key == "watchDir" else key
+        value = cfg.get(store)
+        if spec["type"] == "int":
+            good = isinstance(value, int) and not isinstance(value, bool)
+            if good:
+                lo, hi = spec.get("min"), spec.get("max")
+                good = (lo is None or value >= lo) and (hi is None or value <= hi)
+        elif spec["type"] == "url":
+            good = isinstance(value, str) and value.strip() != ""
+        else:
+            good = (isinstance(value, list) and bool(value)
+                    and all(isinstance(v, str) for v in value))
+        if not good:
+            print(f"{APP}: ignoring {store} in {CONFIG_PATH}: {value!r} is not "
+                  f"valid, using {DEFAULT_CONFIG[store]!r}", file=sys.stderr)
+            cfg[store] = DEFAULT_CONFIG[store]
+    return cfg
+
+
 def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
     if CONFIG_PATH.exists():
@@ -183,6 +212,9 @@ def load_config() -> dict:
             cfg.update(json.loads(CONFIG_PATH.read_text()))
         except (OSError, json.JSONDecodeError) as e:
             print(f"{APP}: ignoring bad config {CONFIG_PATH}: {e}", file=sys.stderr)
+    # Before origin is derived, so a rejected appUrl takes the default host
+    # with it rather than leaving the two disagreeing.
+    cfg = sanitise_config(cfg)
     # `origin` is not a setting of its own: it has to be whatever host appUrl
     # points at. Two separate values could disagree, and the receiver would
     # then send an Access-Control-Allow-Origin for a site the app is not

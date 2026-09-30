@@ -383,6 +383,43 @@ def test_pending_counts_only_new_exports():
         check("an unreadable file is not nagged about", s.json("panel")["pending"], 1)
 
 
+def test_a_bad_config_value_does_not_blank_the_bar():
+    print("\nconfig type checking")
+    with Sandbox() as s:
+        import json as _json
+        s.run("import", fixture("baseline.json"))
+        cfgdir = s.dir / "config" / "gotrain"
+        cfgdir.mkdir(parents=True, exist_ok=True)
+
+        # config.json is hand-editable, so a quoted number is an easy slip. It
+        # used to reach compute_status as a string and raise a TypeError,
+        # leaving the widget blank with no hint why.
+        (cfgdir / "config.json").write_text(_json.dumps({"staleDays": "3"}))
+        r = s.run("status", "--json")
+        check("status still succeeds", r.returncode, 0)
+        check("the bad value falls back to the default",
+              _json.loads(r.stdout)["staleDays"], 3)
+        check("and says so on stderr", "ignoring staleDays" in r.stderr, True)
+        check("the panel renders too", s.run("panel").returncode, 0)
+
+        # Out of range counts as invalid, not just the wrong type.
+        (cfgdir / "config.json").write_text(_json.dumps({"port": 99999}))
+        r = s.run("config", "list", "--json")
+        check("an out-of-range int falls back",
+              _json.loads(r.stdout)["port"]["value"], 8765)
+
+        # A list-valued setting given a bare string.
+        (cfgdir / "config.json").write_text(_json.dumps({"watchDirs": "nope"}))
+        check("a malformed watch folder falls back",
+              s.json("panel")["watchDirs"], [str(Path("~/Downloads").expanduser())])
+
+        # A valid file is left exactly alone.
+        (cfgdir / "config.json").write_text(_json.dumps({"staleDays": 5}))
+        r = s.run("status", "--json")
+        check("a valid value is kept", _json.loads(r.stdout)["staleDays"], 5)
+        check("and nothing is printed about it", r.stderr.strip(), "")
+
+
 def test_export_states_its_schema():
     print("\nexport schema")
     with Sandbox() as s:
@@ -613,6 +650,7 @@ def main():
                  test_panel_shape, test_config_validation, test_app_url,
                  test_sync_all_lets_the_newest_export_win,
                  test_days_bucket_in_local_time, test_pending_counts_only_new_exports,
+                 test_a_bad_config_value_does_not_blank_the_bar,
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url,
                  test_packaging, test_qml_parses):
