@@ -986,6 +986,52 @@ def cmd_sync(args, cfg, db):
     return 0
 
 
+def cmd_today(args, cfg, db):
+    """Answer the question status does not: did I already train today?
+
+    status reports when the last session was, which is the wrong answer on a
+    day you have one. One line, so a shell prompt or a script can use it, and
+    exit 1 when nothing was done today so `gotrain today && ...` reads as
+    English. Days are local, via local_date, for the same reason as B-6.
+    """
+    today = datetime.now().astimezone().date()
+    rows = [r for r in db.execute(
+        "SELECT id, ts, plan, done_exercises, total_exercises, total_sets "
+        "FROM workouts WHERE ts IS NOT NULL ORDER BY ts DESC")
+        if local_date(r["ts"]) == today]
+    last = db.execute(
+        "SELECT ts, plan FROM workouts WHERE ts IS NOT NULL ORDER BY ts DESC LIMIT 1"
+    ).fetchone()
+
+    days_since = None
+    if last and local_date(last["ts"]):
+        days_since = (today - local_date(last["ts"])).days
+    result = {
+        "trainedToday": bool(rows),
+        "sessions": [{
+            "id": r["id"], "plan": r["plan"],
+            "time": to_local(r["ts"]).strftime("%H:%M") if to_local(r["ts"]) else None,
+            "exercises": f"{r['done_exercises'] or 0}/{r['total_exercises'] or 0}",
+            "sets": r["total_sets"] or 0,
+        } for r in rows],
+        "daysSinceLast": days_since,
+        "lastPlan": last["plan"] if last else None,
+    }
+
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    elif rows:
+        parts = [f"{x['plan'] or '?'} at {x['time']} ({x['exercises']} exercises, "
+                 f"{x['sets']} sets)" for x in result["sessions"]]
+        print("today: " + "; ".join(parts))
+    elif days_since is None:
+        print("nothing recorded yet")
+    else:
+        when = "yesterday" if days_since == 1 else f"{days_since} days ago"
+        print(f"not yet today -- last was {result['lastPlan'] or '?'}, {when}")
+    return 0 if rows else 1
+
+
 def cmd_status(args, cfg, db):
     st = compute_status(db, cfg)
     if args.json:
@@ -1819,6 +1865,10 @@ def main(argv=None):
     p.add_argument("value", nargs="?")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_config)
+
+    p = sub.add_parser("today", help="what was done today; exits 1 if nothing")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_today)
 
     p = sub.add_parser("status", help="summary (the bar widget reads --json)")
     p.add_argument("--json", action="store_true")

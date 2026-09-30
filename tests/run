@@ -420,6 +420,59 @@ def test_a_bad_config_value_does_not_blank_the_bar():
         check("and nothing is printed about it", r.stderr.strip(), "")
 
 
+def _one_session(ts, plan="Leg Day"):
+    import json as _json
+    d = _json.loads(Path(fixture("baseline.json")).read_text())
+    d["history"] = [{
+        "id": "t-" + ts, "ts": ts, "plan": plan, "planId": "p1",
+        "totalExercises": 2, "doneExercises": 2, "totalSets": 6,
+        "exercises": [{"id": "e1", "name": "Squat", "muscle": "legs", "type": "reps",
+                       "sets": 3, "reps": "5", "kg": "100", "setsCompleted": 3, "done": True}],
+    }]
+    return d
+
+
+def test_today():
+    print("\ngotrain today")
+    import json as _json
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    def run_with(ts, tz="Europe/Berlin"):
+        with Sandbox() as s:
+            s.env["TZ"] = tz
+            if ts is not None:
+                path = s.dir / "x.json"
+                path.write_text(_json.dumps(_one_session(ts)))
+                s.run("import", str(path))
+            return s.run("today"), s.run("today", "--json")
+
+    berlin = ZoneInfo("Europe/Berlin")
+    now = datetime.now(berlin)
+
+    txt, js = run_with(now.astimezone(ZoneInfo("UTC")).isoformat().replace("+00:00", "Z"))
+    check("a session today exits 0", txt.returncode, 0)
+    check("and names it", "today: Leg Day" in txt.stdout, True)
+    check("json agrees", _json.loads(js.stdout)["trainedToday"], True)
+
+    txt, js = run_with((now - timedelta(days=1)).isoformat())
+    check("only yesterday exits 1, so && works", txt.returncode, 1)
+    check("and says how long it has been", "yesterday" in txt.stdout, True)
+    check("json says not today", _json.loads(js.stdout)["trainedToday"], False)
+
+    txt, _ = run_with(None)
+    check("an empty archive exits 1", txt.returncode, 1)
+    check("and says so plainly", "nothing recorded yet" in txt.stdout, True)
+
+    # Local midnight: 00:30 in Berlin is still yesterday in UTC. It must count
+    # as today -- the same boundary B-6 fixed for the week count.
+    just_after = now.replace(hour=0, minute=30, second=0, microsecond=0)
+    utc = just_after.astimezone(ZoneInfo("UTC")).isoformat().replace("+00:00", "Z")
+    txt, _ = run_with(utc)
+    check("00:30 local counts as today although UTC says yesterday",
+          txt.returncode, 0)
+
+
 def test_export_states_its_schema():
     print("\nexport schema")
     with Sandbox() as s:
@@ -650,7 +703,7 @@ def main():
                  test_panel_shape, test_config_validation, test_app_url,
                  test_sync_all_lets_the_newest_export_win,
                  test_days_bucket_in_local_time, test_pending_counts_only_new_exports,
-                 test_a_bad_config_value_does_not_blank_the_bar,
+                 test_a_bad_config_value_does_not_blank_the_bar, test_today,
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url,
                  test_packaging, test_qml_parses):
