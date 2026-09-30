@@ -465,15 +465,25 @@ def ingest(db, state: dict, *, source: str, kind: str = "full", raw: bytes | Non
 
     # The plan library is current-state, not history: replace it wholesale, but
     # only from a full export -- a delta carries no library at all.
-    if kind == "full":
+    #
+    # Except when the export has no plans and the archive does. That export is
+    # valid (a fresh install ships none), but it is also exactly what the wrong
+    # iOS storage container produces, and replacing the library with it would
+    # leave `export` -- the way back to a working phone -- with nothing to hand
+    # over. Keeping the old library is the recoverable mistake; the scalars go
+    # with it, since activePlanId and progress point into that library.
+    incoming_plans = [p for p in state.get("plans") or []
+                      if isinstance(p, dict) and p.get("id")]
+    library_kept = (kind == "full" and not incoming_plans and
+                    db.execute("SELECT COUNT(*) c FROM plans").fetchone()["c"] > 0)
+    if kind == "full" and not library_kept:
         db.execute("DELETE FROM plans")
-        for p in state.get("plans") or []:
-            if isinstance(p, dict) and p.get("id"):
-                db.execute(
-                    "INSERT OR REPLACE INTO plans (id, name, json, updated_at) VALUES (?,?,?,?)",
-                    (str(p["id"]), p.get("name"),
-                     json.dumps(p, ensure_ascii=False), stamp),
-                )
+        for p in incoming_plans:
+            db.execute(
+                "INSERT OR REPLACE INTO plans (id, name, json, updated_at) VALUES (?,?,?,?)",
+                (str(p["id"]), p.get("name"),
+                 json.dumps(p, ensure_ascii=False), stamp),
+            )
         db.execute("DELETE FROM exercises")
         for e in state.get("globalExercises") or []:
             if isinstance(e, dict) and e.get("id"):
@@ -512,7 +522,7 @@ def ingest(db, state: dict, *, source: str, kind: str = "full", raw: bytes | Non
         prs.sort(key=lambda r: -(r["best"] - r["previous"]))
 
     return {"duplicate": False, "new": new, "seen": seen,
-            "snapshot_id": snapshot_id, "prs": prs}
+            "snapshot_id": snapshot_id, "prs": prs, "library_kept": library_kept}
 
 
 def refresh_cursor(db):
@@ -797,6 +807,8 @@ def report_import(result, label):
         print(f"{label}: already imported, nothing to do")
         return False
     print(f"{label}: {result['new']} new of {result['seen']} workouts")
+    if result.get("library_kept"):
+        print(f"{label}: has no plans -- kept the archived plan library")
     return True
 
 
