@@ -888,10 +888,14 @@ def cmd_sync(args, cfg, db):
     if not found:
         dirs = ", ".join(cfg["watchDirs"])
         die(f"no GoTrain export found in {dirs}\n"
-            f"       send one from the phone (Settings -> Send to PC) or use "
+            f"       export one from the phone (Settings -> Data -> Export) or use "
             f"`{APP} import <file>`")
 
-    targets = found if args.all else found[:1]
+    # Oldest first when importing several. The plan library, activePlanId,
+    # progress and schema are last-writer-wins, so importing newest-first
+    # would leave the *oldest* file's library in place and hand a stale one
+    # back to the phone on the next export. Workouts merge either way.
+    targets = list(reversed(found)) if args.all else found[:1]
     results = []
     for path in targets:
         try:

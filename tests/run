@@ -263,6 +263,48 @@ def pair_output_in(sandbox, result):
     return r.stdout if r.returncode == 0 else f"<crashed: {r.stderr.strip()[:120]}>"
 
 
+def test_sync_all_lets_the_newest_export_win():
+    print("\nsync --all ordering")
+    with Sandbox() as s:
+        import json as _json, os, time
+        watch = s.dir / "drop"
+        watch.mkdir()
+        s.run("config", "set", "watchDir", str(watch))
+
+        def export_named(name, path, mtime):
+            d = _json.loads(Path(fixture("baseline.json")).read_text())
+            d["plans"][0]["name"] = name
+            d["history"] = []
+            path.write_text(_json.dumps(d))
+            os.utime(path, (mtime, mtime))
+
+        # The library is last-writer-wins, so whichever file is imported last
+        # decides what the phone gets back. That must be the newest one.
+        export_named("OLD plan", watch / "gotrain-old.json", time.time() - 3600)
+        export_named("NEW plan", watch / "gotrain-new.json", time.time())
+
+        s.run("sync", "--all")
+        check("the newest export's plan library wins",
+              s.json("export")["plans"][0]["name"], "NEW plan")
+
+    with Sandbox() as s:
+        # A plain sync still takes only the newest file.
+        import json as _json, os, time
+        watch = s.dir / "drop"
+        watch.mkdir()
+        s.run("config", "set", "watchDir", str(watch))
+        for name, secs in (("OLD plan", 3600), ("NEW plan", 0)):
+            d = _json.loads(Path(fixture("baseline.json")).read_text())
+            d["plans"][0]["name"] = name
+            d["history"] = []
+            f = watch / f"gotrain-{name.split()[0].lower()}.json"
+            f.write_text(_json.dumps(d))
+            os.utime(f, (time.time() - secs, time.time() - secs))
+        s.run("sync")
+        check("a plain sync still takes the newest",
+              s.json("export")["plans"][0]["name"], "NEW plan")
+
+
 def test_export_states_its_schema():
     print("\nexport schema")
     with Sandbox() as s:
@@ -491,6 +533,7 @@ def main():
 
     for test in (test_import_and_merge, test_progress_numbers, test_personal_records,
                  test_panel_shape, test_config_validation, test_app_url,
+                 test_sync_all_lets_the_newest_export_win,
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url,
                  test_packaging, test_qml_parses):
