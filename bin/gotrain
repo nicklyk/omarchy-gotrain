@@ -426,11 +426,13 @@ def ingest(db, state: dict, *, source: str, kind: str = "full", raw: bytes | Non
     carries on to the next file on purpose. An object where GoTrain writes
     text (a crafted or corrupted export) only fails when SQLite binds it,
     which is deep inside the merge; it becomes a ValueError so every caller
-    reports it like any other unreadable export instead of a traceback.
+    reports it like any other unreadable export instead of a traceback. An
+    integer past 64 bits fails at the same point but as an OverflowError,
+    which sqlite3 does not wrap in one of its own exceptions.
     """
     try:
         return _ingest(db, state, source=source, kind=kind, raw=raw)
-    except (sqlite3.ProgrammingError, sqlite3.InterfaceError) as e:
+    except (sqlite3.ProgrammingError, sqlite3.InterfaceError, OverflowError) as e:
         db.rollback()
         raise ValueError(f"a field holds a value GoTrain never writes ({e})") from None
     except BaseException:

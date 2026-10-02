@@ -778,6 +778,13 @@ def test_a_malformed_export_is_refused_cleanly():
         bad_export(bad)
         refused("object in a text field", s.run("import", str(bad)))
         s.run("import", str(bad))
+
+        # Past SQLite's 64-bit INTEGER: an OverflowError, not a sqlite3 error.
+        big = s.dir / "big.json"
+        d = json.loads(Path(fixture("baseline.json")).read_text())
+        d["history"][-1]["totalSets"] = 10 ** 20
+        big.write_text(json.dumps(d))
+        refused("integer too large for SQLite", s.run("import", str(big)))
         check("no orphan snapshot files, even after a retry",
               sorted(p.name for p in snaps.iterdir()) if snaps.is_dir() else [], [])
         import sqlite3
