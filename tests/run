@@ -743,6 +743,79 @@ def test_qml_parses():
 
 
 # ─────────────────────────────────────────────────────────────────────────
+def test_a_malformed_export_is_refused_cleanly():
+    print("\nmalformed exports")
+
+    def bad_export(path, *, extra_good=None):
+        """baseline with an object where GoTrain writes the plan's name.
+        extra_good puts a valid, new workout *before* the bad one, so a
+        missing rollback shows up as that workout reaching the archive."""
+        d = json.loads(Path(fixture("baseline.json")).read_text())
+        d["history"][-1]["plan"] = {"x": 1}
+        if extra_good:
+            good = dict(d["history"][0], id=extra_good, plan="P")
+            d["history"].insert(0, good)
+        path.write_text(json.dumps(d))
+
+    def refused(name, r):
+        lines = r.stderr.strip().splitlines()
+        check(f"{name}: exit 1", r.returncode, 1)
+        check_that(f"{name}: no traceback", "Traceback" not in r.stderr, r.stderr)
+        check_that(f"{name}: one 'gotrain: ...' line",
+                   len(lines) == 1 and lines[0].startswith("gotrain: "), r.stderr)
+
+    with Sandbox() as s:
+        import gzip as _gz
+        snaps = s.dir / "data" / "gotrain" / "snapshots"
+
+        # An interrupted LocalSend transfer: gzip cut off mid-stream.
+        cut = s.dir / "cut.json"
+        cut.write_bytes(_gz.compress(Path(fixture("baseline.json")).read_bytes())[:200])
+        refused("truncated gzip", s.run("import", str(cut)))
+
+        # Fails only when SQLite binds it, after the snapshot used to be written.
+        bad = s.dir / "bad.json"
+        bad_export(bad)
+        refused("object in a text field", s.run("import", str(bad)))
+        s.run("import", str(bad))
+        check("no orphan snapshot files, even after a retry",
+              sorted(p.name for p in snaps.iterdir()) if snaps.is_dir() else [], [])
+        import sqlite3
+        db = sqlite3.connect(s.dir / "data" / "gotrain" / "gotrain.db")
+        check("and no snapshot rows",
+              db.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 0)
+        db.close()
+
+    with Sandbox() as s:
+        import os, time
+        watch = s.dir / "drop"
+        watch.mkdir()
+        s.run("config", "set", "watchDir", str(watch))
+        # sync --all goes oldest first, so the bad file is merged before the
+        # good one and its half-done transaction would ride along.
+        bad_export(watch / "gotrain-bad.json", extra_good="leak")
+        import gzip as _gz
+        # Named .json like the real thing: exports are recognised as gzip by
+        # their magic bytes, not by extension.
+        (watch / "gotrain-cut.json").write_bytes(
+            _gz.compress(Path(fixture("baseline.json")).read_bytes())[:200])
+        shutil.copy(fixture("baseline.json"), watch / "gotrain-good.json")
+        now = time.time()
+        for i, n in enumerate(("gotrain-bad.json", "gotrain-cut.json", "gotrain-good.json")):
+            os.utime(watch / n, (now - 300 + i * 100, now - 300 + i * 100))
+
+        r = s.run("sync", "--all")
+        check("sync --all skips bad files and still succeeds", r.returncode, 0)
+        check_that("and says which it skipped",
+                   "skipping gotrain-bad.json" in r.stderr
+                   and "skipping gotrain-cut.json" in r.stderr
+                   and "Traceback" not in r.stderr, r.stderr)
+        check("the good export is imported, nothing from the bad one",
+              sorted(h["id"] for h in s.json("export")["history"]), ["w1", "w2", "w3"])
+        check("one snapshot file, for the good export",
+              len(list((s.dir / "data" / "gotrain" / "snapshots").iterdir())), 1)
+
+
 def main():
     if not CLI.is_file():
         sys.exit(f"cannot find the CLI at {CLI}")
@@ -753,7 +826,7 @@ def main():
                  test_days_bucket_in_local_time, test_pending_counts_only_new_exports,
                  test_a_bad_config_value_does_not_blank_the_bar, test_today, test_export_csv,
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
-                 test_origin_follows_app_url,
+                 test_origin_follows_app_url, test_a_malformed_export_is_refused_cleanly,
                  test_packaging, test_qml_parses):
         test()
 

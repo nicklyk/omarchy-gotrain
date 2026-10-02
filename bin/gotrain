@@ -47,6 +47,7 @@ import subprocess
 import sys
 import threading
 import urllib.parse
+import zlib
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -418,7 +419,26 @@ def ingest(db, state: dict, *, source: str, kind: str = "full", raw: bytes | Non
     Workouts are keyed by GoTrain's own history id and inserted with
     INSERT OR IGNORE, so a phone that prunes or resets its history can never
     remove what this machine already recorded.
+
+    All or nothing. sqlite3 opens a transaction implicitly and keeps it open
+    after an exception, so without the rollback a file that failed halfway
+    would have its rows committed by the *next* import -- `sync --all`
+    carries on to the next file on purpose. An object where GoTrain writes
+    text (a crafted or corrupted export) only fails when SQLite binds it,
+    which is deep inside the merge; it becomes a ValueError so every caller
+    reports it like any other unreadable export instead of a traceback.
     """
+    try:
+        return _ingest(db, state, source=source, kind=kind, raw=raw)
+    except (sqlite3.ProgrammingError, sqlite3.InterfaceError) as e:
+        db.rollback()
+        raise ValueError(f"a field holds a value GoTrain never writes ({e})") from None
+    except BaseException:
+        db.rollback()
+        raise
+
+
+def _ingest(db, state: dict, *, source: str, kind: str, raw: bytes | None):
     validate_state(state, kind)
 
     if raw is None:
@@ -433,8 +453,9 @@ def ingest(db, state: dict, *, source: str, kind: str = "full", raw: bytes | Non
     stamp = now_iso()
     snap_path = None
     if kind == "full":
+        # Written just before the commit, not here: a merge that fails would
+        # leave a snapshot file no row points to, one more on every retry.
         snap_path = SNAPSHOT_DIR / f"{stamp.replace(':', '')}-{digest[:8]}.json"
-        snap_path.write_bytes(raw)
 
     cur = db.execute(
         "INSERT INTO snapshots (sha256, imported_at, source, path, kind) "
@@ -557,7 +578,14 @@ def ingest(db, state: dict, *, source: str, kind: str = "full", raw: bytes | Non
         (seen, new, snapshot_id),
     )
     refresh_cursor(db)
-    db.commit()
+    try:
+        if snap_path is not None:
+            snap_path.write_bytes(raw)
+        db.commit()
+    except BaseException:
+        if snap_path is not None:
+            snap_path.unlink(missing_ok=True)
+        raise
 
     prs = []
     if had_data and new:
@@ -580,7 +608,13 @@ def refresh_cursor(db):
 def read_state_bytes(raw: bytes):
     """Accept gzip or plain JSON; return (state, canonical_raw_json_bytes)."""
     if raw[:2] == b"\x1f\x8b":
-        raw = gzip.decompress(raw)
+        # A LocalSend transfer cut short leaves a truncated gzip, which raises
+        # EOFError or zlib.error -- neither is a ValueError, so the callers'
+        # "skip the unreadable file" handling never saw it.
+        try:
+            raw = gzip.decompress(raw)
+        except (EOFError, zlib.error, gzip.BadGzipFile) as e:
+            raise ValueError(f"not a complete gzip file -- was the transfer cut short? ({e})") from None
     text = raw.decode("utf-8-sig")
     return json.loads(text), raw
 
