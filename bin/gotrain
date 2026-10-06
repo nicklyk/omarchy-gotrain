@@ -173,7 +173,10 @@ def die(msg: str, code: int = 1):
 
 def origin_of(url: str) -> str:
     """Scheme and host of `url`, for the receiver's CORS header."""
-    parsed = urllib.parse.urlparse(url or "")
+    try:
+        parsed = urllib.parse.urlparse(url or "")
+    except ValueError:                       # "http://[::1" -- unbalanced IPv6
+        return DEFAULT_CONFIG["origin"]
     if parsed.scheme in ("http", "https") and parsed.netloc:
         return f"{parsed.scheme}://{parsed.netloc}"
     return DEFAULT_CONFIG["origin"]
@@ -198,6 +201,14 @@ def sanitise_config(cfg: dict) -> dict:
                 good = (lo is None or value >= lo) and (hi is None or value <= hi)
         elif spec["type"] == "url":
             good = isinstance(value, str) and value.strip() != ""
+            if good:
+                # urlparse raises on an unbalanced "[" rather than returning
+                # something unusable, and appUrl is handed straight to the
+                # panel, so treat it as one more invalid value.
+                try:
+                    urllib.parse.urlparse(value)
+                except ValueError:
+                    good = False
         else:
             good = (isinstance(value, list) and bool(value)
                     and all(isinstance(v, str) for v in value))
@@ -208,13 +219,33 @@ def sanitise_config(cfg: dict) -> dict:
     return cfg
 
 
+def read_config_file():
+    """(settings, problem) from config.json.
+
+    settings is {} when there is no file, and None when there is one that
+    cannot be used: unreadable, not JSON, or JSON that is not an object.
+    The last case matters as much as the others -- `null` or `[1]` used to
+    reach dict.update() and raise in every command, `status --json`
+    included, which left the bar widget blank.
+    """
+    if not CONFIG_PATH.exists():
+        return {}, None
+    try:
+        stored = json.loads(CONFIG_PATH.read_text())
+    except (OSError, ValueError) as e:       # ValueError: bad JSON or bad UTF-8
+        return None, str(e)
+    if not isinstance(stored, dict):
+        return None, f"expected a JSON object, found {type(stored).__name__}"
+    return stored, None
+
+
 def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
-    if CONFIG_PATH.exists():
-        try:
-            cfg.update(json.loads(CONFIG_PATH.read_text()))
-        except (OSError, json.JSONDecodeError) as e:
-            print(f"{APP}: ignoring bad config {CONFIG_PATH}: {e}", file=sys.stderr)
+    stored, problem = read_config_file()
+    if stored is None:
+        print(f"{APP}: ignoring bad config {CONFIG_PATH}: {problem}", file=sys.stderr)
+    else:
+        cfg.update(stored)
     # Before origin is derived, so a rejected appUrl takes the default host
     # with it rather than leaving the two disagreeing.
     cfg = sanitise_config(cfg)
@@ -1111,10 +1142,7 @@ EDITABLE = {
 
 def config_view(cfg) -> dict:
     """Current value of every editable key, plus whether the user set it."""
-    try:
-        stored = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
-    except (OSError, json.JSONDecodeError):
-        stored = {}
+    stored = read_config_file()[0] or {}
 
     out = {}
     for key, spec in EDITABLE.items():
@@ -1157,8 +1185,11 @@ def config_set(key: str, raw: str):
         else:
             if "://" not in text:
                 text = "https://" + text
-            parsed = urllib.parse.urlparse(text)
-            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            try:
+                parsed = urllib.parse.urlparse(text)
+            except ValueError:
+                parsed = None
+            if not parsed or parsed.scheme not in ("http", "https") or not parsed.netloc:
                 die(f"{key} must be an http or https address, got '{raw}'")
             store_key, store_value = key, text.rstrip("/")
     else:
@@ -1170,10 +1201,14 @@ def config_set(key: str, raw: str):
             die(f"no such folder: {Path(text).expanduser()}")
         store_key, store_value = "watchDirs", [text]
 
-    try:
-        stored = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
-    except (OSError, json.JSONDecodeError):
-        stored = {}
+    stored, problem = read_config_file()
+    if stored is None:
+        # Writing back only this one key would silently discard everything
+        # else in a hand-edited file that has a stray comma. The panel's
+        # Settings tab calls this, so the loss would come from one click.
+        # Refuse and leave the file exactly as it is.
+        die(f"not changing {key}: {CONFIG_PATH} cannot be read ({problem}). "
+            "Fix or remove it, then try again.")
 
     if store_value == DEFAULT_CONFIG[store_key]:
         stored.pop(store_key, None)          # back to default: drop the override

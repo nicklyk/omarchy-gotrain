@@ -420,6 +420,63 @@ def test_a_bad_config_value_does_not_blank_the_bar():
         check("and nothing is printed about it", r.stderr.strip(), "")
 
 
+def test_a_broken_config_file_is_not_wiped_and_does_not_blank_the_bar():
+    print("\nconfig file that is not a JSON object (B-14)")
+    with Sandbox() as s:
+        s.run("import", fixture("baseline.json"))
+        cfgdir = s.dir / "config" / "gotrain"
+        cfgdir.mkdir(parents=True, exist_ok=True)
+        cfg = cfgdir / "config.json"
+
+        # Valid JSON of the wrong shape used to reach dict.update() and raise
+        # in every command, so the widget went blank.
+        for text in ("null", "[1]", '"x"', "42"):
+            cfg.write_text(text + "\n")
+            r = s.run("status", "--json")
+            check(f"status survives a config of {text}", r.returncode, 0)
+            check(f"  and uses the defaults for {text}",
+                  json.loads(r.stdout)["staleDays"] if r.returncode == 0 else None, 3)
+            check(f"  with one warning for {text}",
+                  r.stderr.count("ignoring bad config"), 1)
+            check(f"  config list renders for {text}",
+                  s.run("config", "list", "--json").returncode, 0)
+
+        # A stray comma in a hand-edited file: `config set` used to write back
+        # only the one key it was given, discarding the rest.
+        for text in ('{"staleDays":5,"port":9000,}', "null", "[1]"):
+            cfg.write_text(text)
+            before = cfg.read_bytes()
+            r = s.run("config", "set", "pairTimeout", "600")
+            check(f"config set refuses over {text}", r.returncode, 1)
+            check(f"  and says which file for {text}", str(cfg) in r.stderr, True)
+            check(f"  leaving it byte-identical for {text}", cfg.read_bytes(), before)
+
+        # Not UTF-8 at all is a ValueError too, not a traceback.
+        cfg.write_bytes(b"\xff\xfe{")
+        check("a config that is not UTF-8 is ignored",
+              s.run("status", "--json").returncode, 0)
+
+        # Once the file is fixed, set works and keeps the other keys.
+        cfg.write_text('{"staleDays": 5, "port": 9000}')
+        check("config set works on a valid file",
+              s.run("config", "set", "pairTimeout", "600").returncode, 0)
+        check("  and keeps the hand-edited keys", json.loads(cfg.read_text()),
+              {"staleDays": 5, "port": 9000, "pairTimeout": 600})
+
+        # urlparse raises on an unbalanced IPv6 bracket instead of returning
+        # something to reject. Hand-edited, it broke every command.
+        cfg.write_text(json.dumps({"appUrl": "http://[::1"}))
+        r = s.run("status", "--json")
+        check("a malformed appUrl does not blank the bar", r.returncode, 0)
+        check("  and falls back to the default address",
+              s.out("config", "get", "appUrl"), "https://niclick.org/GoTrain")
+        cfg.unlink()
+        r = s.run("config", "set", "appUrl", "http://[::1")
+        check("config set rejects it cleanly", r.returncode, 1)
+        check("  without a traceback", "Traceback" in r.stderr, False)
+        check("  and writes nothing", cfg.exists(), False)
+
+
 def _one_session(ts, plan="Leg Day"):
     import json as _json
     d = _json.loads(Path(fixture("baseline.json")).read_text())
@@ -831,7 +888,9 @@ def main():
                  test_panel_shape, test_config_validation, test_app_url,
                  test_sync_all_lets_the_newest_export_win,
                  test_days_bucket_in_local_time, test_pending_counts_only_new_exports,
-                 test_a_bad_config_value_does_not_blank_the_bar, test_today, test_export_csv,
+                 test_a_bad_config_value_does_not_blank_the_bar,
+                 test_a_broken_config_file_is_not_wiped_and_does_not_blank_the_bar,
+                 test_today, test_export_csv,
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url, test_a_malformed_export_is_refused_cleanly,
                  test_packaging, test_qml_parses):
