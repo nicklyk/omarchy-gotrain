@@ -233,6 +233,7 @@ def connect() -> sqlite3.Connection:
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
+    db.create_function("utc_key", 1, utc_key, deterministic=True)
     db.executescript(SCHEMA)
     return db
 
@@ -356,6 +357,24 @@ def to_local(ts: str | None):
     if dt.tzinfo is None:
         dt = dt.astimezone()
     return dt.astimezone()
+
+
+def utc_key(ts: str | None):
+    """ts as the app writes it -- UTC, toISOString() shape -- for ordering.
+
+    Stored ts come in two shapes: the app's UTC `...19:30:00.000Z`, and a
+    legacy entry's local `...20:00:00+02:00` from parse_legacy_datetime. As
+    text these do not sort by instant, so the latest workout and the sync
+    cursor came out wrong whenever both met within the offset (B-24). Every
+    ORDER BY and MIN/MAX on ts goes through this instead. The stored rows are
+    left as they are. Unparseable text is returned unchanged so it still sorts
+    somewhere rather than raising inside SQLite.
+    """
+    dt = to_local(ts)
+    if dt is None:
+        return ts
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") \
+        + f"{dt.microsecond // 1000:03d}Z"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -603,7 +622,11 @@ def _ingest(db, state: dict, *, source: str, kind: str, raw: bytes | None):
 
 
 def refresh_cursor(db):
-    row = db.execute("SELECT MAX(ts) AS m FROM workouts WHERE ts IS NOT NULL").fetchone()
+    # The phone compares this with its own toISOString() values as text
+    # (syncPayload), so it is written in exactly that shape, never with an
+    # offset.
+    row = db.execute(
+        "SELECT MAX(utc_key(ts)) AS m FROM workouts WHERE ts IS NOT NULL").fetchone()
     meta_set(db, "cursor_ts", row["m"] or "")
 
 
@@ -701,7 +724,7 @@ def load_series(db, name=None):
     if name:
         sql += " AND lower(e.name) = lower(?)"
         args.append(name)
-    sql += " ORDER BY w.ts"
+    sql += " ORDER BY utc_key(w.ts)"
 
     out = {}
     for r in db.execute(sql, args):
@@ -783,7 +806,7 @@ def fmt_load(value, unit):
 def compute_status(db, cfg) -> dict:
     total = db.execute("SELECT COUNT(*) AS c FROM workouts").fetchone()["c"]
     last = db.execute(
-        "SELECT * FROM workouts WHERE ts IS NOT NULL ORDER BY ts DESC LIMIT 1"
+        "SELECT * FROM workouts WHERE ts IS NOT NULL ORDER BY utc_key(ts) DESC LIMIT 1"
     ).fetchone()
 
     out = {
@@ -841,7 +864,7 @@ def build_state(db) -> dict:
 
     history = []
     rows = db.execute(
-        "SELECT * FROM workouts ORDER BY (ts IS NULL), ts DESC, first_seen DESC"
+        "SELECT * FROM workouts ORDER BY (ts IS NULL), utc_key(ts) DESC, first_seen DESC"
     ).fetchall()
     for w in rows:
         exs = [
@@ -1035,10 +1058,10 @@ def cmd_today(args, cfg, db):
     today = datetime.now().astimezone().date()
     rows = [r for r in db.execute(
         "SELECT id, ts, plan, done_exercises, total_exercises, total_sets "
-        "FROM workouts WHERE ts IS NOT NULL ORDER BY ts DESC")
+        "FROM workouts WHERE ts IS NOT NULL ORDER BY utc_key(ts) DESC")
         if local_date(r["ts"]) == today]
     last = db.execute(
-        "SELECT ts, plan FROM workouts WHERE ts IS NOT NULL ORDER BY ts DESC LIMIT 1"
+        "SELECT ts, plan FROM workouts WHERE ts IS NOT NULL ORDER BY utc_key(ts) DESC LIMIT 1"
     ).fetchone()
 
     days_since = None
@@ -1230,7 +1253,7 @@ def cmd_panel(args, cfg, db):
             "sets": w["total_sets"],
         }
         for w in db.execute(
-            "SELECT * FROM workouts ORDER BY (ts IS NULL), ts DESC, first_seen DESC "
+            "SELECT * FROM workouts ORDER BY (ts IS NULL), utc_key(ts) DESC, first_seen DESC "
             "LIMIT ?", (args.number,)
         )
     ]
@@ -1268,7 +1291,7 @@ def cmd_panel(args, cfg, db):
 
 def cmd_list(args, cfg, db):
     rows = db.execute(
-        "SELECT * FROM workouts ORDER BY (ts IS NULL), ts DESC, first_seen DESC LIMIT ?",
+        "SELECT * FROM workouts ORDER BY (ts IS NULL), utc_key(ts) DESC, first_seen DESC LIMIT ?",
         (args.number,),
     ).fetchall()
     if not rows:
@@ -1367,7 +1390,8 @@ def cmd_stats(args, cfg, db):
         return 0
     print(f"workouts recorded : {total}")
     span = db.execute(
-        "SELECT MIN(ts) AS a, MAX(ts) AS b FROM workouts WHERE ts IS NOT NULL"
+        "SELECT (SELECT ts FROM workouts WHERE ts IS NOT NULL ORDER BY utc_key(ts) LIMIT 1) AS a, "
+        "(SELECT ts FROM workouts WHERE ts IS NOT NULL ORDER BY utc_key(ts) DESC LIMIT 1) AS b"
     ).fetchone()
     if span["a"]:
         print(f"first / last      : {span['a'][:10]} .. {span['b'][:10]}")
@@ -1412,7 +1436,7 @@ def export_csv(db) -> str:
         "SELECT w.ts, w.plan, e.name, e.muscle, e.type, e.sets, e.sets_completed, "
         "e.reps, e.kg, e.duration_min, e.done, e.json "
         "FROM workout_exercises e JOIN workouts w ON w.id = e.workout_id "
-        "ORDER BY (w.ts IS NULL), w.ts, e.idx")
+        "ORDER BY (w.ts IS NULL), utc_key(w.ts), e.idx")
     for r in rows:
         local = to_local(r["ts"])
         # durationSecs is exact where the app recorded it; duration_min is the
@@ -1848,7 +1872,9 @@ def cmd_pair(args, cfg, db):
     firewall_preflight(port, args.force)
     token = secrets.token_urlsafe(16)
     ip = lan_ip()
-    cursor = meta_get(db, "cursor_ts", "") or ""
+    # An archive whose cursor was written before B-24 may still hold one with
+    # an offset, which the phone's text comparison misreads; send it as UTC.
+    cursor = utc_key(meta_get(db, "cursor_ts", "") or "") or ""
     phash = meta_get(db, "plan_hash", "") or ""
     db.close()
 
