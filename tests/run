@@ -800,6 +800,66 @@ def test_qml_parses():
 
 
 # ─────────────────────────────────────────────────────────────────────────
+def test_latest_workout_is_picked_by_instant_not_text():
+    print("\nordering by instant (B-24)")
+    # A legacy entry (no ts, only the display date/time) is stored with the
+    # local offset; the app writes UTC. 20:00+02:00 is 18:00Z, while the app's
+    # 19:30Z is 21:30 in Berlin -- later, though its text sorts first.
+    import sqlite3 as _sq
+
+    def entry(**kw):
+        e = {"plan": "P", "planId": "p1", "totalExercises": 1, "doneExercises": 1,
+             "totalSets": 3,
+             "exercises": [{"id": "e1", "name": "Bench", "muscle": "chest",
+                            "type": "reps", "sets": 3, "reps": "10", "kg": "60",
+                            "setsCompleted": 3, "done": True}]}
+        e.update(kw)
+        return e
+
+    def cursor_of(s):
+        db = _sq.connect(s.dir / "data" / "gotrain" / "gotrain.db")
+        try:
+            return db.execute("SELECT value FROM meta WHERE key = 'cursor_ts'").fetchone()[0]
+        finally:
+            db.close()
+
+    def archive(s, history):
+        d = json.loads(Path(fixture("baseline.json")).read_text())
+        d["history"] = history
+        path = s.dir / "mixed.json"
+        path.write_text(json.dumps(d))
+        s.env["TZ"] = "Europe/Berlin"
+        return s.run("import", str(path))
+
+    with Sandbox() as s:
+        r = archive(s, [entry(id="late", plan="Late", ts="2026-10-05T19:30:00.000Z"),
+                        entry(id="early", plan="Early", date="5.10.2026", time="20:00")])
+        check("the mixed export imports", r.returncode, 0)
+
+        status = s.json("status", "--json")
+        check("status: lastPlan is the 21:30 workout", status["lastPlan"], "Late")
+        check("status: lastTs is its ts", status["lastTs"], "2026-10-05T19:30:00.000Z")
+        rows = s.out("list").splitlines()
+        check_that("list: the 21:30 workout is the first row",
+                   rows and "Late" in rows[0], rows)
+        check("panel: the 21:30 workout comes first",
+              [w["plan"] for w in s.json("panel")["recent"]][:2], ["Late", "Early"])
+        # The phone compares the cursor with its own toISOString() values as
+        # text, so it must be in exactly that shape.
+        check("cursor_ts is the latest instant, in the app's UTC form",
+              cursor_of(s), "2026-10-05T19:30:00.000Z")
+
+    with Sandbox() as s:
+        # The other way round: the legacy entry is the later one. Its text
+        # already sorts last; the cursor must still come out in Z form.
+        archive(s, [entry(id="early", plan="Early", ts="2026-10-05T17:00:00.000Z"),
+                    entry(id="late", plan="Late", date="5.10.2026", time="20:00")])
+        check("a later legacy entry is still the latest",
+              s.json("status", "--json")["lastPlan"], "Late")
+        check("and the cursor is its instant in UTC", cursor_of(s), "2026-10-05T18:00:00.000Z")
+
+
+# ─────────────────────────────────────────────────────────────────────────
 def test_a_malformed_export_is_refused_cleanly():
     print("\nmalformed exports")
 
@@ -887,7 +947,8 @@ def main():
     for test in (test_import_and_merge, test_progress_numbers, test_personal_records,
                  test_panel_shape, test_config_validation, test_app_url,
                  test_sync_all_lets_the_newest_export_win,
-                 test_days_bucket_in_local_time, test_pending_counts_only_new_exports,
+                 test_days_bucket_in_local_time,
+                 test_latest_workout_is_picked_by_instant_not_text, test_pending_counts_only_new_exports,
                  test_a_bad_config_value_does_not_blank_the_bar,
                  test_a_broken_config_file_is_not_wiped_and_does_not_blank_the_bar,
                  test_today, test_export_csv,
