@@ -800,6 +800,42 @@ def test_qml_parses():
 
 
 # ─────────────────────────────────────────────────────────────────────────
+CURSOR_PROBE = """
+import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("gotrain_cli", %r)
+mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("gotrain_cli", loader))
+sys.argv = ["gotrain"]
+loader.exec_module(mod)
+db = mod.connect()
+if %r is not None:
+    mod.meta_set(db, "cursor_ts", %r); db.commit()
+print(mod.cursor_for_phone(db))
+"""
+
+
+def test_an_old_cursor_is_sent_as_utc():
+    print("\nold sync cursor")
+    def sent(stored):
+        with Sandbox() as s:
+            s.env["TZ"] = "Europe/Berlin"
+            s.run("import", fixture("baseline.json"))
+            r = subprocess.run([sys.executable, "-c", CURSOR_PROBE % (str(CLI), stored, stored)],
+                               env=s.env, capture_output=True, text=True)
+            return r.stdout.strip() or r.stderr.strip()[-120:]
+    # Written before B-24, with an offset. The phone compares as text, so this
+    # must leave in the same UTC form it writes, or a later workout sorts below
+    # it and is never sent.
+    check("an offset cursor is sent as the same instant in UTC",
+          sent("2026-06-10T20:00:00+02:00"), "2026-06-10T18:00:00.000Z")
+    check("a UTC cursor is sent unchanged",
+          sent("2026-06-10T19:30:00.000Z"), "2026-06-10T19:30:00.000Z")
+    # Shape alone decides the phone's comparison, so prove the point directly:
+    # a genuinely later workout must now sort above the cursor as text.
+    check("a later workout now sorts above it as text",
+          "2026-06-10T19:45:00.000Z" > sent("2026-06-10T20:00:00+02:00"), True)
+
+
 def test_latest_workout_is_picked_by_instant_not_text():
     print("\nordering by instant (B-24)")
     # A legacy entry (no ts, only the display date/time) is stored with the
@@ -948,7 +984,8 @@ def main():
                  test_panel_shape, test_config_validation, test_app_url,
                  test_sync_all_lets_the_newest_export_win,
                  test_days_bucket_in_local_time,
-                 test_latest_workout_is_picked_by_instant_not_text, test_pending_counts_only_new_exports,
+                 test_latest_workout_is_picked_by_instant_not_text, test_an_old_cursor_is_sent_as_utc,
+                 test_pending_counts_only_new_exports,
                  test_a_bad_config_value_does_not_blank_the_bar,
                  test_a_broken_config_file_is_not_wiped_and_does_not_blank_the_bar,
                  test_today, test_export_csv,

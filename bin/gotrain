@@ -1902,14 +1902,25 @@ def b64url_decode(data: bytes) -> bytes:
     return base64.urlsafe_b64decode(s + pad)
 
 
+def cursor_for_phone(db) -> str:
+    """The sync cursor in the shape the phone compares it in.
+
+    The phone keeps only workouts whose ts sorts after this *as text*, against
+    its own toISOString() values. An archive whose cursor was written before
+    B-24 can still hold one with an offset -- 20:00:00+02:00 -- and a later
+    workout at 19:45:00.000Z sorts below that, so the phone would never send
+    it. Normalised here, on the way out, rather than by rewriting the row.
+    Its own function so it can be tested without starting the receiver.
+    """
+    return utc_key(meta_get(db, "cursor_ts", "") or "") or ""
+
+
 def cmd_pair(args, cfg, db):
     port = args.port or cfg["port"]
     firewall_preflight(port, args.force)
     token = secrets.token_urlsafe(16)
     ip = lan_ip()
-    # An archive whose cursor was written before B-24 may still hold one with
-    # an offset, which the phone's text comparison misreads; send it as UTC.
-    cursor = utc_key(meta_get(db, "cursor_ts", "") or "") or ""
+    cursor = cursor_for_phone(db)
     phash = meta_get(db, "plan_hash", "") or ""
     db.close()
 
