@@ -7,7 +7,9 @@ an Omarchy desktop, and keeps it there.
 A bar pill shows the weight-lifting icon, turning urgent once you are overdue.
 Clicking it opens recent sessions, this week's count and an eight-week muscle
 balance, a Progress tab showing how the load on each exercise has moved, and a
-Settings tab. A `gotrain` CLI does the same from a terminal.
+Settings tab. Right-click the pill to import the newest export from your
+drop folder, middle-click to refresh it. A `gotrain` CLI does the same from a
+terminal.
 
 Nothing syncs on its own: there is no daemon, no timer, and no background
 network traffic. You move the data when you want to.
@@ -71,9 +73,9 @@ open.
 
 | Command | What it does |
 |---|---|
-| `gotrain sync` | Import the newest export from the watch folders |
+| `gotrain sync [--all]` | Import the newest export from the watch folders, or every match |
 | `gotrain import FILE…` | Import specific files |
-| `gotrain pair [--port N]` | Show a QR code and receive one transfer |
+| `gotrain pair [--port N] [--force]` | Show a QR code and receive one transfer; `--force` skips the firewall check |
 | `gotrain progress [name]` | How the load on each exercise has moved |
 | `gotrain records` | Best ever load per exercise |
 | `gotrain doctor` | Why the phone cannot reach this machine |
@@ -151,15 +153,18 @@ gotrain config set appUrl ''          # back to the default
 
 `config set` validates ranges and rejects unknown keys, and only writes what
 differs from the defaults — so an untouched install has an empty (or absent)
-config file. Change the pairing port and you will need a matching firewall
+config file. If `config.json` exists but cannot be read, `config set` refuses
+to write rather than replace it with defaults. Change the pairing port and you will need a matching firewall
 rule; the tab says so, and `gotrain doctor` will confirm it.
 
 The day count is only hidden, not lost: it stays in the pill's tooltip
 alongside the last plan name and this week's total.
 
-Two IPC entry points, for keybindings:
+IPC entry points, for keybindings:
 
 ```bash
+omarchy-shell nicklyk.gotrain toggle       # open or close the popup
+omarchy-shell nicklyk.gotrain sync         # same as the ⤓ button
 omarchy-shell nicklyk.gotrain settings     # open straight to the Settings tab
 omarchy-shell nicklyk.gotrain toggleDays   # show/hide the day count
 ```
@@ -170,7 +175,8 @@ omarchy-shell nicklyk.gotrain toggleDays   # show/hide the day count
 tests/run
 ```
 
-Covers import and merge, progression figures against a fixture with known
+Covers import and merge, refusal of malformed exports and unreadable config,
+progression figures against a fixture with known
 numbers, personal-record detection including the first-import guard, the panel
 payload (with an empty archive as well as a full one), config validation, and
 that the receiver's allowed origin follows the configured address. It also
@@ -188,11 +194,13 @@ each one was confirmed by breaking the code under it and watching it go red.
 
 ```
 ~/.local/share/gotrain/gotrain.db      SQLite archive
-~/.local/share/gotrain/snapshots/      every raw import, kept verbatim
+~/.local/share/gotrain/snapshots/      every accepted import, kept verbatim
 ~/.config/gotrain/config.json          watch folders, port, thresholds
 ```
 
-Workouts are keyed by GoTrain's own history id and merged, never replaced. A
+Workouts are keyed by GoTrain's own history id and merged, never replaced. An
+export that is malformed is refused as a whole: nothing is imported and no
+snapshot is kept. A
 phone-side reset, a pruned history, or switching between the home screen app
 and Safari cannot remove what this machine already recorded — which is also
 why `gotrain export` is useful: it writes a merged state you can load back
