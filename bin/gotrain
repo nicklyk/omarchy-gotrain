@@ -1024,7 +1024,13 @@ def find_exports(cfg):
 def load_export(path):
     """(state, raw) for a file that is a GoTrain export at all, else ValueError
     or OSError. raw is what ingest hashes and stores: decompressed, as sent."""
-    state, raw = read_state_bytes(path.read_bytes())
+    try:
+        state, raw = read_state_bytes(path.read_bytes())
+    except RecursionError:
+        # json.loads raises this, not a ValueError, past ~1000 levels of
+        # nesting. The panel parses the newest file on every poll, so letting
+        # it escape would blank the panel over one odd file in ~/Downloads.
+        raise ValueError("nested too deeply to be a GoTrain export") from None
     validate_state(state, "full")
     return state, raw
 

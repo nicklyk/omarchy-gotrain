@@ -427,6 +427,16 @@ def test_pending_says_what_sync_would_do():
                    and "Traceback" not in r.stderr, r.stderr)
         check("still nothing pending", pending(s), 0)
 
+        # json.loads raises RecursionError, not ValueError, on deep nesting.
+        # The panel parses the newest file now, so it must not die on one.
+        drop(watch, "gotrain-deep.json", data=b"[" * 100000 + b"]" * 100000)
+        r = s.run("panel")
+        check("a deeply nested newest file does not break the panel", r.returncode, 0)
+        r = s.run("sync")
+        check_that("and sync skips it too",
+                   r.returncode == 0 and "skipping gotrain-deep.json" in r.stderr
+                   and "Traceback" not in r.stderr, r.stderr)
+
     with Sandbox() as s:
         watch = s.dir / "drop"
         watch.mkdir()
