@@ -1092,9 +1092,9 @@ def cmd_sync(args, cfg, db):
     newer_imported = newest_imported(db, found) if args.all else None
     results = []
     for path in targets:
-        older = (newer_imported is not None and
-                 path.stat().st_mtime < newer_imported.stat().st_mtime)
         try:
+            older = (newer_imported is not None and
+                     path.stat().st_mtime < newer_imported.stat().st_mtime)
             state, raw = read_state_bytes(path.read_bytes())
             res = ingest(db, state, source=f"localsend:{path}", raw=raw,
                          library=not older)
