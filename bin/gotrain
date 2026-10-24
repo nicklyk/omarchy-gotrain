@@ -1045,32 +1045,68 @@ def find_exports(cfg):
     return sorted(set(hits), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def load_export(path):
+    """(state, raw) for a file that is a GoTrain export at all, else ValueError
+    or OSError. raw is what ingest hashes and stores: decompressed, as sent."""
+    try:
+        state, raw = read_state_bytes(path.read_bytes())
+    except RecursionError:
+        # json.loads raises this, not a ValueError, past ~1000 levels of
+        # nesting. The panel parses the newest file on every poll, so letting
+        # it escape would blank the panel over one odd file in ~/Downloads.
+        raise ValueError("nested too deeply to be a GoTrain export") from None
+    validate_state(state, "full")
+    return state, raw
+
+
+def newest_export(cfg):
+    """The file a plain `sync` imports: the newest one that is an export at all.
+
+    Returns (path, state, raw, skipped); path is None when nothing qualifies,
+    and skipped lists the (path, error) pairs passed over on the way. A newer
+    file that cannot be read -- a LocalSend transfer cut short, a stray
+    `gotrain-notes.json` -- used to make sync stop at it and import nothing,
+    while an older valid export sat behind it (B-18).
+
+    Never anything older than the newest readable file, though: the plan
+    library is last-writer-wins, so importing an older export after a newer
+    one would hand the phone back a stale library (B-4).
+    """
+    skipped = []
+    for path in find_exports(cfg):
+        try:
+            state, raw = load_export(path)
+        except (ValueError, OSError) as e:
+            skipped.append((path, e))
+            continue
+        return path, state, raw, skipped
+    return None, None, None, skipped
+
+
 def pending_exports(db, cfg):
-    """Exports in the watch folders this archive has not already taken.
+    """What pressing Enter in the panel -- a plain `sync` -- would import.
 
     The count behind the panel's "press Enter to import" was simply how many
     files were in the folder, so it never cleared: one export sat in
-    ~/Downloads and the nag stayed for weeks after it had been imported.
+    ~/Downloads and the nag stayed for weeks after it had been imported (B-8).
+    Counting only files missing from snapshots was still not what sync does:
+    sync takes the newest file alone, so an older un-imported export behind an
+    imported newer one kept "1 waiting" on screen while sync said "already
+    imported, nothing to do", for good; and invalid JSON was counted although
+    it can never be imported (B-18).
 
-    Hash the way ingest does -- after decompressing, since that is what it
-    stores -- and skip anything already in snapshots. A file that cannot be
-    read or unpacked is not counted: it cannot be imported either, so nagging
-    about it would recreate the bug in a smaller form.
+    So ask the same question sync asks. The answer is one file or none. It
+    hashes the way ingest does -- after decompressing, since that is what it
+    stores. An export whose shape passes but fails deep inside the merge is
+    still counted; only the merge itself can tell, and status must not write.
     """
-    out = []
-    for path in find_exports(cfg):
-        try:
-            raw = path.read_bytes()
-            if raw[:2] == b"\x1f\x8b":
-                raw = gzip.decompress(raw)
-            digest = hashlib.sha256(raw).hexdigest()
-        except Exception:  # noqa: BLE001 - unreadable means nothing to offer
-            continue
-        if not db.execute(
-            "SELECT 1 FROM snapshots WHERE sha256 = ?", (digest,)
-        ).fetchone():
-            out.append(path)
-    return out
+    path, _, raw, _ = newest_export(cfg)
+    if path is None:
+        return []
+    digest = hashlib.sha256(raw).hexdigest()
+    if db.execute("SELECT 1 FROM snapshots WHERE sha256 = ?", (digest,)).fetchone():
+        return []
+    return [path]
 
 
 def cmd_sync(args, cfg, db):
@@ -1081,11 +1117,17 @@ def cmd_sync(args, cfg, db):
             f"       export one from the phone (Settings -> Data -> Export) or use "
             f"`{APP} import <file>`")
 
-    # Oldest first when importing several. The plan library, activePlanId,
-    # progress and schema are last-writer-wins, so importing newest-first
-    # would leave the *oldest* file's library in place and hand a stale one
-    # back to the phone on the next export. Workouts merge either way.
-    targets = list(reversed(found)) if args.all else found[:1]
+    if args.all:
+        # Oldest first when importing several. The plan library, activePlanId,
+        # progress and schema are last-writer-wins, so importing newest-first
+        # would leave the *oldest* file's library in place and hand a stale one
+        # back to the phone on the next export. Workouts merge either way.
+        targets = list(reversed(found))
+    else:
+        path, _, _, skipped = newest_export(cfg)
+        for bad, e in skipped:
+            print(f"{APP}: skipping {bad.name}: {e}", file=sys.stderr)
+        targets = [path] if path else []
     results = []
     for path in targets:
         try:

@@ -367,20 +367,102 @@ def test_pending_counts_only_new_exports():
 
         _sh.copy(fixture("pr.json"), watch / "gotrain-2.json")
         check("a genuinely new file counts again", s.json("panel")["pending"], 1)
+        s.run("sync")
 
         # Same content, different name: already imported, so not pending.
         _sh.copy(fixture("baseline.json"), watch / "gotrain-copy.json")
         check("a renamed copy of an imported export does not count",
-              s.json("panel")["pending"], 1)
+              s.json("panel")["pending"], 0)
 
         # gzip is hashed after decompressing, the way ingest stores it.
         (watch / "gotrain-3.json.gz").write_bytes(
             _gz.compress(Path(fixture("baseline.json")).read_bytes()))
         check("a gzipped copy of an imported export does not count either",
-              s.json("panel")["pending"], 1)
+              s.json("panel")["pending"], 0)
 
         (watch / "gotrain-broken.json").write_bytes(b"\x1f\x8b truncated")
-        check("an unreadable file is not nagged about", s.json("panel")["pending"], 1)
+        check("an unreadable file is not nagged about", s.json("panel")["pending"], 0)
+
+
+def test_pending_says_what_sync_would_do():
+    print("\npending agrees with sync")
+
+    def drop(watch, name, *, src=None, data=None, age=0):
+        import time
+        path = watch / name
+        if src:
+            shutil.copy(fixture(src), path)
+        else:
+            path.write_bytes(data)
+        t = time.time() - age
+        os.utime(path, (t, t))
+
+    def pending(s):
+        return s.json("panel")["pending"]
+
+    with Sandbox() as s:
+        watch = s.dir / "drop"
+        watch.mkdir()
+        s.run("config", "set", "watchDir", str(watch))
+        # An older export never imported, a newer one already imported. A
+        # plain sync takes only the newest -- importing the older one would
+        # bring its stale plan library back (B-4) -- so nothing is waiting.
+        # It used to say "1 waiting" here for good, while sync said "already
+        # imported, nothing to do" every time Enter was pressed.
+        drop(watch, "gotrain-old.json", src="pr.json", age=3600)
+        drop(watch, "gotrain-new.json", src="baseline.json")
+        s.run("import", str(watch / "gotrain-new.json"))
+        r = s.run("sync")
+        check_that("sync takes the newest, already imported",
+                   "already imported" in r.stdout, r.stdout + r.stderr)
+        check("so nothing is pending", pending(s), 0)
+
+        # A broken newest file: not counted, and sync does not die on it.
+        drop(watch, "gotrain-broken.json", data=b'{"broken')
+        check("a broken newest file is not counted", pending(s), 0)
+        r = s.run("sync")
+        check("sync passes over it", r.returncode, 0)
+        check_that("and says it skipped it",
+                   "skipping gotrain-broken.json" in r.stderr
+                   and "Traceback" not in r.stderr, r.stderr)
+        check("still nothing pending", pending(s), 0)
+
+        # json.loads raises RecursionError, not ValueError, on deep nesting.
+        # The panel parses the newest file now, so it must not die on one.
+        drop(watch, "gotrain-deep.json", data=b"[" * 100000 + b"]" * 100000)
+        r = s.run("panel")
+        check("a deeply nested newest file does not break the panel", r.returncode, 0)
+        r = s.run("sync")
+        check_that("and sync skips it too",
+                   r.returncode == 0 and "skipping gotrain-deep.json" in r.stderr
+                   and "Traceback" not in r.stderr, r.stderr)
+
+    with Sandbox() as s:
+        watch = s.dir / "drop"
+        watch.mkdir()
+        s.run("config", "set", "watchDir", str(watch))
+        # Broken and not-an-export files newer than a valid new export must
+        # not block it: it is what sync imports, so it is what is pending.
+        drop(watch, "gotrain-new.json", src="baseline.json", age=300)
+        drop(watch, "gotrain-cut.json", data=b"\x1f\x8b cut short", age=200)
+        drop(watch, "gotrain-notes.json", data=b'{"notes": "not an export"}', age=100)
+        drop(watch, "gotrain-broken.json", data=b'{"broken')
+        check("only the valid export is pending", pending(s), 1)
+        r = s.run("sync")
+        check("sync imports it", r.returncode, 0)
+        check("its workouts are in the archive",
+              sorted(h["id"] for h in s.json("export")["history"]), ["w1", "w2", "w3"])
+        check("and pending clears after the sync", pending(s), 0)
+
+    with Sandbox() as s:
+        watch = s.dir / "drop"
+        watch.mkdir()
+        s.run("config", "set", "watchDir", str(watch))
+        drop(watch, "gotrain-broken.json", data=b'{"broken')
+        check("nothing importable: nothing pending", pending(s), 0)
+        r = s.run("sync")
+        check("and sync still says nothing could be imported", r.returncode, 1)
+        check_that("in its usual words", "nothing could be imported" in r.stderr, r.stderr)
 
 
 def test_a_bad_config_value_does_not_blank_the_bar():
@@ -1043,7 +1125,7 @@ def main():
                  test_sync_all_lets_the_newest_export_win,
                  test_days_bucket_in_local_time,
                  test_latest_workout_is_picked_by_instant_not_text, test_an_old_cursor_is_sent_as_utc,
-                 test_pending_counts_only_new_exports,
+                 test_pending_counts_only_new_exports, test_pending_says_what_sync_would_do,
                  test_a_bad_config_value_does_not_blank_the_bar,
                  test_a_broken_config_file_is_not_wiped_and_does_not_blank_the_bar,
                  test_today, test_export_csv,
