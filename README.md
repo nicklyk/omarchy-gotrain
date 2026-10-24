@@ -29,6 +29,14 @@ here; `gotrain sync`, or the ⤓ button in the panel, then picks up the newest
 export from `~/Downloads`. Encrypted, no size limit, and nothing to set up
 beyond LocalSend on both ends.
 
+A plain sync imports one file: the newest that is a GoTrain export at all.
+Files it cannot read are skipped and named, so a half-downloaded file does not
+block a good one behind it. The panel's *waiting* count asks the same question,
+so it is 0 or 1 and clears once you sync. `gotrain sync --all` imports every
+match, oldest first. Workouts from all of them are merged, but the plan library
+only ever comes from the newest: an older file never replaces the library of
+a newer one, even when the newer one was imported on an earlier run.
+
 Two steps rather than one because iOS will not offer LocalSend for a `.json`
 handed to it by a web share sheet. The app used to have a *Send to PC* button
 that tried; the file had to be saved to the phone first regardless, so the
@@ -116,6 +124,11 @@ colour-only cue would say nothing at all there.
 Exercises measured in time rather than weight (a treadmill, say) are tracked
 the same way in minutes.
 
+An exercise you skipped is not a session. GoTrain still writes it into the
+workout, with the plan's load, so it is left out of the progress series,
+`gotrain records` and the import notification's PRs. A workout from an older
+GoTrain that did not record what was done still counts.
+
 ## Settings
 
 The popup has three tabs. **Settings** covers everything worth tuning:
@@ -176,8 +189,10 @@ tests/run
 ```
 
 Covers import and merge, refusal of malformed exports and unreadable config,
-progression figures against a fixture with known
-numbers, personal-record detection including the first-import guard, the panel
+which file `sync` picks and that the panel's waiting count agrees with it, the
+plan library surviving `sync --all`, progression figures against a fixture with
+known numbers, skipped exercises staying out of progress and records,
+personal-record detection including the first-import guard, the panel
 payload (with an empty archive as well as a full one), config validation, and
 that the receiver's allowed origin follows the configured address. It also
 checks the manifest, that the CLI survives a clone executable, and that the QML
@@ -201,8 +216,9 @@ each one was confirmed by breaking the code under it and watching it go red.
 Workouts are keyed by GoTrain's own history id and merged, never replaced. An
 export that is malformed is refused as a whole: nothing is imported and no
 snapshot is kept. A
-phone-side reset, a pruned history, or switching between the home screen app
-and Safari cannot remove what this machine already recorded — which is also
+phone-side reset, a pruned history, a workout deleted in the app, or switching
+between the home screen app and Safari cannot remove what this machine already
+recorded — which is also
 why `gotrain export` is useful: it writes a merged state you can load back
 into either.
 
