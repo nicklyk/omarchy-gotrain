@@ -463,8 +463,13 @@ def plan_hash(state: dict) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def ingest(db, state: dict, *, source: str, kind: str = "full", raw: bytes | None = None):
+def ingest(db, state: dict, *, source: str, kind: str = "full", raw: bytes | None = None,
+           library: bool = True):
     """Merge one state blob. Returns a summary dict.
+
+    library=False merges the workouts but leaves the plan library and its
+    scalars alone, for an export the caller knows is older than one already
+    imported.
 
     Workouts are keyed by GoTrain's own history id and inserted with
     INSERT OR IGNORE, so a phone that prunes or resets its history can never
@@ -481,7 +486,7 @@ def ingest(db, state: dict, *, source: str, kind: str = "full", raw: bytes | Non
     which sqlite3 does not wrap in one of its own exceptions.
     """
     try:
-        return _ingest(db, state, source=source, kind=kind, raw=raw)
+        return _ingest(db, state, source=source, kind=kind, raw=raw, library=library)
     except (sqlite3.ProgrammingError, sqlite3.InterfaceError, OverflowError) as e:
         db.rollback()
         raise ValueError(f"a field holds a value GoTrain never writes ({e})") from None
@@ -490,7 +495,8 @@ def ingest(db, state: dict, *, source: str, kind: str = "full", raw: bytes | Non
         raise
 
 
-def _ingest(db, state: dict, *, source: str, kind: str, raw: bytes | None):
+def _ingest(db, state: dict, *, source: str, kind: str, raw: bytes | None,
+            library: bool = True):
     validate_state(state, kind)
 
     if raw is None:
@@ -596,7 +602,7 @@ def _ingest(db, state: dict, *, source: str, kind: str, raw: bytes | None):
                       if isinstance(p, dict) and p.get("id")]
     library_kept = (kind == "full" and not incoming_plans and
                     db.execute("SELECT COUNT(*) c FROM plans").fetchone()["c"] > 0)
-    if kind == "full" and not library_kept:
+    if kind == "full" and library and not library_kept:
         db.execute("DELETE FROM plans")
         for p in incoming_plans:
             db.execute(
@@ -1109,6 +1115,27 @@ def pending_exports(db, cfg):
     return [path]
 
 
+def newest_imported(db, found):
+    """(path, mtime) of the newest of `found` (newest first) that the archive
+    already holds, or None. Hashed after decompressing, as ingest stores it.
+
+    The mtime is taken here, once: if the file were stat'ed again per target,
+    deleting it mid-sync would make every older file fail with an error that
+    names the wrong file, and their workouts would be skipped."""
+    for path in found:
+        try:
+            raw = path.read_bytes()
+            if raw[:2] == b"\x1f\x8b":
+                raw = gzip.decompress(raw)
+            mtime = path.stat().st_mtime
+        except Exception:  # noqa: BLE001 - unreadable was never imported
+            continue
+        digest = hashlib.sha256(raw).hexdigest()
+        if db.execute("SELECT 1 FROM snapshots WHERE sha256 = ?", (digest,)).fetchone():
+            return path, mtime
+    return None
+
+
 def cmd_sync(args, cfg, db):
     found = find_exports(cfg)
     if not found:
@@ -1122,21 +1149,33 @@ def cmd_sync(args, cfg, db):
         # progress and schema are last-writer-wins, so importing newest-first
         # would leave the *oldest* file's library in place and hand a stale one
         # back to the phone on the next export. Workouts merge either way.
+        #
+        # Ordering alone is not enough when a newer file was imported on an
+        # earlier run: ingest returns before the library on a duplicate, so the
+        # older file would be the last to write it. An older file still gives up
+        # its workouts, but not its library.
         targets = list(reversed(found))
+        newer_imported = newest_imported(db, found)
     else:
         path, _, _, skipped = newest_export(cfg)
         for bad, e in skipped:
             print(f"{APP}: skipping {bad.name}: {e}", file=sys.stderr)
         targets = [path] if path else []
+        newer_imported = None
     results = []
     for path in targets:
         try:
+            older = (newer_imported is not None and
+                     path.stat().st_mtime < newer_imported[1])
             state, raw = read_state_bytes(path.read_bytes())
-            res = ingest(db, state, source=f"localsend:{path}", raw=raw)
+            res = ingest(db, state, source=f"localsend:{path}", raw=raw,
+                         library=not older)
         except (ValueError, json.JSONDecodeError, OSError) as e:
             print(f"{APP}: skipping {path.name}: {e}", file=sys.stderr)
             continue
-        report_import(res, path.name)
+        if report_import(res, path.name) and older:
+            print(f"{path.name}: older than {newer_imported[0].name} -- "
+                  f"kept the archived plan library")
         results.append(res)
     if not results:
         die("nothing could be imported")
