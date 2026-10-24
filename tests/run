@@ -742,6 +742,64 @@ def test_origin_follows_app_url():
               load_config_in(s)["origin"], "http://192.168.1.50:8080")
 
 
+def test_skipped_exercises_are_not_sessions():
+    print("\nskipped exercises in progress, records and PRs")
+    import json as _json
+
+    def export(s, fname, history):
+        d = _json.loads(Path(fixture("baseline.json")).read_text())
+        d["history"] = history
+        path = s.dir / fname
+        path.write_text(_json.dumps(d))
+        return str(path)
+
+    def workout(wid, ts, **bench):
+        ex = {"id": "e1", "name": "Bench", "muscle": "chest", "type": "reps",
+              "sets": 3, "reps": "10"}
+        ex.update(bench)
+        return {"id": wid, "ts": ts, "plan": "P", "planId": "p1",
+                "totalExercises": 1, "totalSets": 3, "exercises": [ex]}
+
+    # The phone writes a row for every exercise in the plan, skipped ones
+    # included, with the plan's load: 80 kg was planned on the 20th, not lifted.
+    lifted = workout("w1", "2026-09-10T12:00:00.000Z",
+                     kg="57.5", setsCompleted=3, done=True)
+    skipped = workout("w2", "2026-09-20T12:00:00.000Z",
+                      kg="80", setsCompleted=0, done=False)
+
+    with Sandbox() as s:
+        s.env["TZ"] = "UTC"
+        s.run("import", export(s, "one.json", [lifted]))
+        out = s.out("import", export(s, "two.json", [skipped, lifted]))
+        check("importing a skipped heavier exercise announces no PR", "PR" in out, False)
+
+        recs = {r["name"]: r for r in s.json("records", "--json")}
+        check("a skipped exercise is not a record",
+              (recs["Bench"]["best"], recs["Bench"]["date"]), (57.5, "2026-09-10"))
+        rows = s.json("progress", "Bench", "--json")
+        check("a skipped exercise is not a session",
+              (rows[0]["sessions"], rows[0]["series"]), (1, [57.5]))
+
+    with Sandbox() as s:
+        # Partly done counts, as on the phone: sets ticked but not finished.
+        s.env["TZ"] = "UTC"
+        s.run("import", export(s, "one.json", [lifted]))
+        partial = workout("w3", "2026-09-20T12:00:00.000Z",
+                          kg="62.5", setsCompleted=1, done=False)
+        out = s.out("import", export(s, "two.json", [partial, lifted]))
+        check("a partly done exercise still sets a PR", "62.5" in out, True)
+
+    with Sandbox() as s:
+        # A row from before the phone wrote done/setsCompleted is archived
+        # with done = 0, yet it was a real session and must still count.
+        s.env["TZ"] = "UTC"
+        s.run("import", export(s, "legacy.json",
+                               [workout("w0", "2026-08-01T12:00:00.000Z", kg="50")]))
+        recs = {r["name"]: r for r in s.json("records", "--json")}
+        check("a legacy row without done or setsCompleted still counts",
+              recs.get("Bench", {}).get("best"), 50.0)
+
+
 def test_packaging():
     print("\npackaging")
     manifest = json.loads((PLUGIN / "manifest.json").read_text())
@@ -991,6 +1049,7 @@ def main():
                  test_today, test_export_csv,
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url, test_a_malformed_export_is_refused_cleanly,
+                 test_skipped_exercises_are_not_sessions,
                  test_packaging, test_qml_parses):
         test()
 

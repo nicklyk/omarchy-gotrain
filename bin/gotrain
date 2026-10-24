@@ -746,9 +746,31 @@ def weight(v):
     return value if value > 0 else None
 
 
+def row_was_done(row) -> bool:
+    """The phone's rowWasDone, applied to an archived exercise row.
+
+    The phone writes a history row for every exercise in the plan, skipped
+    ones included, carrying the plan's load -- so a skipped row is not a
+    session at that load. The `done` column cannot answer this alone: it is
+    stored as 0 when the field was missing, which is also how a legacy row
+    from before `done` and `setsCompleted` existed looks, and those count.
+    So the original field is read back from the stored json.
+    """
+    if row["done"]:
+        return True
+    if row["sets_completed"] is not None:
+        return row["sets_completed"] > 0
+    try:
+        ex = json.loads(row["json"] or "{}")
+    except ValueError:
+        ex = {}
+    return not isinstance(ex, dict) or "done" not in ex
+
+
 def load_series(db, name=None):
     """{exercise: {muscle, unit, points: [(date, value)]}} oldest first."""
-    sql = ("SELECT e.name, e.muscle, e.type, e.kg, e.duration_min, w.ts "
+    sql = ("SELECT e.name, e.muscle, e.type, e.kg, e.duration_min, "
+           "e.done, e.sets_completed, e.json, w.ts "
            "FROM workout_exercises e JOIN workouts w ON w.id = e.workout_id "
            "WHERE w.ts IS NOT NULL")
     args = []
@@ -759,6 +781,8 @@ def load_series(db, name=None):
 
     out = {}
     for r in db.execute(sql, args):
+        if not row_was_done(r):
+            continue
         timed = (r["type"] or "") == "time"
         value = weight(r["duration_min"] if timed else r["kg"])
         if value is None:
