@@ -273,6 +273,8 @@ Panel {
   readonly property string headline: {
     if (loadError !== "") return "!"
     if (!hasData) return "—"
+    // Imported, but none had a set done: the CLI reports no daysSince.
+    if (daysSince < 0) return "—"
     if (daysSince === 0) return "0"
     return String(daysSince)
   }
@@ -280,6 +282,7 @@ Panel {
   readonly property string subhead: {
     if (loadError !== "") return "could not read the archive"
     if (!hasData) return "no workouts imported yet"
+    if (daysSince < 0) return "no workout with a set done yet"
     if (daysSince === 0) return "trained today"
     if (daysSince === 1) return "day since your last workout"
     return "days since your last workout"
