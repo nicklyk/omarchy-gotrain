@@ -154,6 +154,10 @@ moment you click. Everything else lives in the CLI config so a terminal
 `gotrain status` can never disagree with the pill about whether you are
 overdue.
 
+A workout finished with nothing done -- no set ticked, no exercise marked --
+is still archived and listed, but it does not count as training: it does not
+reset the overdue count, the week count or `gotrain today`.
+
 The same settings from a terminal:
 
 ```bash
