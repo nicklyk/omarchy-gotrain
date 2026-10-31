@@ -980,6 +980,67 @@ def test_skipped_exercises_are_not_sessions():
               recs.get("Bench", {}).get("best"), 50.0)
 
 
+def test_partly_done_sets_count_in_stats_and_panel():
+    print("\npartly done exercises in stats and the panel's muscle sets")
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+
+    def export(s, fname, history):
+        d = _json.loads(Path(fixture("baseline.json")).read_text())
+        d["history"] = history
+        path = s.dir / fname
+        path.write_text(_json.dumps(d))
+        return str(path)
+
+    def ex(eid, name, muscle, **kw):
+        e = {"id": eid, "name": name, "muscle": muscle, "type": "reps",
+             "sets": 3, "reps": "10", "kg": "60"}
+        e.update(kw)
+        return e
+
+    # Recent, so it falls inside the panel's 8-week window.
+    ts = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT12:00:00.000Z")
+    # Bench was cut short after 2 of 3 sets; Row was finished; Curl was skipped.
+    workout = {"id": "w1", "ts": ts, "plan": "P", "planId": "p1",
+               "totalExercises": 3, "totalSets": 5, "exercises": [
+                   ex("e1", "Bench", "chest", setsCompleted=2, done=False),
+                   ex("e2", "Row", "back", setsCompleted=3, done=True),
+                   ex("e3", "Curl", "biceps", setsCompleted=0, done=False)]}
+
+    with Sandbox() as s:
+        s.env["TZ"] = "Europe/Berlin"
+        s.run("import", export(s, "one.json", [workout]))
+        stats = s.out("stats")
+        muscles_part = stats.split("by muscle group")[1].split("most frequent")[0]
+        frequent_part = stats.split("most frequent exercises:")[1]
+        lines = [l.split() for l in muscles_part.splitlines()[1:] if l.strip()]
+        check("stats counts the sets ticked on a partly done exercise",
+              sorted((l[0], l[-1]) for l in lines), [("Back", "3"), ("Chest", "2")])
+        check("a skipped exercise adds no muscle sets",
+              "Biceps" in muscles_part, False)
+        names = [l.split()[0] for l in frequent_part.splitlines() if l.strip()]
+        check("a partly done exercise is among the most frequent",
+              sorted(names), ["Bench", "Row"])
+
+        panel = s.json("panel")
+        check("the panel's muscle sets count it too",
+              sorted((m["muscle"], m["sets"]) for m in panel["muscles"]),
+              [("Back", 3), ("Chest", 2)])
+
+    with Sandbox() as s:
+        # A legacy row from before done/setsCompleted existed was a session,
+        # as progress and records already count it, but has no sets to add.
+        s.env["TZ"] = "UTC"
+        legacy = {"id": "w0", "ts": "2026-08-01T12:00:00.000Z", "plan": "P",
+                  "planId": "p1", "exercises": [
+                      {"id": "e1", "name": "Bench", "muscle": "chest",
+                       "type": "reps", "sets": 3, "reps": "10", "kg": "50"}]}
+        s.run("import", export(s, "legacy.json", [legacy]))
+        stats = s.out("stats")
+        check("a legacy row counts as a frequent exercise",
+              "Bench" in stats.split("most frequent exercises:")[1], True)
+
+
 def test_packaging():
     print("\npackaging")
     manifest = json.loads((PLUGIN / "manifest.json").read_text())
@@ -1231,6 +1292,7 @@ def main():
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url, test_a_malformed_export_is_refused_cleanly,
                  test_skipped_exercises_are_not_sessions,
+                 test_partly_done_sets_count_in_stats_and_panel,
                  test_packaging, test_qml_parses):
         test()
 

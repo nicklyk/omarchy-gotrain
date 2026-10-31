@@ -129,6 +129,10 @@ workout, with the plan's load, so it is left out of the progress series,
 `gotrain records` and the import notification's PRs. A workout from an older
 GoTrain that did not record what was done still counts.
 
+An exercise you cut short is. The sets you ticked count towards the muscle
+groups in `gotrain stats` and the popup, and the exercise counts among the
+most frequent, even though it was never marked done.
+
 ## Settings
 
 The popup has three tabs. **Settings** covers everything worth tuning:

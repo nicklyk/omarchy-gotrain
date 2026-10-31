@@ -1399,13 +1399,15 @@ def cmd_panel(args, cfg, db):
     ]
 
     # Completed sets per muscle over the trailing 8 weeks -- recent enough to
-    # say something about current training, long enough to be stable.
+    # say something about current training, long enough to be stable. Every
+    # row is summed, not only done ones: sets ticked on an exercise that was
+    # cut short were still trained, and a skipped row holds 0 anyway.
     since = (datetime.now() - timedelta(weeks=8)).date()
     grouped = {}
     for r in db.execute(
         "SELECT e.muscle AS muscle, COALESCE(e.sets_completed, 0) AS s, w.ts AS ts "
         "FROM workout_exercises e JOIN workouts w ON w.id = e.workout_id "
-        "WHERE e.done = 1 AND w.ts IS NOT NULL",
+        "WHERE w.ts IS NOT NULL",
     ):
         day = local_date(r["ts"])
         if not r["s"] or not day or day < since:
@@ -1536,10 +1538,12 @@ def cmd_stats(args, cfg, db):
     if span["a"]:
         print(f"first / last      : {span['a'][:10]} .. {span['b'][:10]}")
     print("\nby muscle group (completed sets):")
+    # Summed over every row, as the panel does: ticked sets count whether or
+    # not the exercise was finished.
     grouped = {}
     for r in db.execute(
         "SELECT muscle, SUM(COALESCE(sets_completed, 0)) AS s "
-        "FROM workout_exercises WHERE done = 1 GROUP BY muscle"
+        "FROM workout_exercises GROUP BY muscle"
     ):
         if not r["s"]:
             continue
@@ -1548,11 +1552,14 @@ def cmd_stats(args, cfg, db):
     for label, total in sorted(grouped.items(), key=lambda kv: -kv[1])[:12]:
         print(f"  {label:<20} {total}")
     print("\nmost frequent exercises:")
-    for r in db.execute(
-        "SELECT name, COUNT(*) AS c FROM workout_exercises WHERE done = 1 "
-        "GROUP BY name ORDER BY c DESC LIMIT 10"
-    ):
-        print(f"  {r['name'] or '?':<28} {r['c']}x")
+    # Sessions as progress and records count them (row_was_done), so a partly
+    # done exercise and a legacy row count and a skipped one does not.
+    counts = {}
+    for r in db.execute("SELECT name, done, sets_completed, json FROM workout_exercises"):
+        if row_was_done(r):
+            counts[r["name"]] = counts.get(r["name"], 0) + 1
+    for name, c in sorted(counts.items(), key=lambda kv: -kv[1])[:10]:
+        print(f"  {name or '?':<28} {c}x")
     return 0
 
 
