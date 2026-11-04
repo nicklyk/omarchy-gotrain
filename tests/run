@@ -1214,6 +1214,76 @@ def test_a_malformed_export_is_refused_cleanly():
               len(list((s.dir / "data" / "gotrain" / "snapshots").iterdir())), 1)
 
 
+def test_progress_finds_a_name_however_it_is_typed():
+    print("\nprogress NAME: non-ASCII case, and a name that is not there")
+    import unicodedata
+
+    def export(s, fname, exercises):
+        d = json.loads(Path(fixture("baseline.json")).read_text())
+        d["history"] = [{"id": "u1", "ts": "2026-09-10T12:00:00.000Z", "plan": "P",
+                         "planId": "p1", "totalExercises": len(exercises),
+                         "totalSets": 3, "exercises": exercises}]
+        path = s.dir / fname
+        path.write_text(json.dumps(d, ensure_ascii=False))
+        return str(path)
+
+    def ex(eid, name, **kw):
+        e = {"id": eid, "name": name, "muscle": "shoulders", "type": "reps",
+             "sets": 3, "reps": "10", "setsCompleted": 3, "done": True}
+        e.update(kw)
+        return e
+
+    with Sandbox() as s:
+        s.env["TZ"] = "Europe/Berlin"
+        s.run("import", fixture("baseline.json"))
+        s.run("import", export(s, "de.json", [
+            ex("d1", "Überkopfdrücken", kg="30"),
+            ex("d2", "Kreuzheben (Straße)", kg="100"),
+            ex("d3", "Plank", kg=""),
+            # Skipped: B-32's rule still applies to a named lookup.
+            ex("d4", "Bench Press", kg="90", setsCompleted=0, done=False)]))
+
+        r = s.run("progress", "überkopfdrücken")
+        check("a lower-case umlaut finds the capitalised exercise",
+              (r.returncode, r.stdout.splitlines()[:1]), (0, ["Überkopfdrücken  (Shoulders)"]))
+        rows = s.json("progress", "ÜBERKOPFDRÜCKEN", "--json")
+        check("an upper-case umlaut finds it too",
+              [(x["name"], x["series"]) for x in rows], [("Überkopfdrücken", [30.0])])
+        decomposed = unicodedata.normalize("NFD", "überkopfdrücken")
+        check("a decomposed ü matches a precomposed one",
+              [x["name"] for x in s.json("progress", decomposed, "--json")],
+              ["Überkopfdrücken"])
+        check("ss matches ß, as casefold() has it",
+              [x["name"] for x in s.json("progress", "kreuzheben (strasse)", "--json")],
+              ["Kreuzheben (Straße)"])
+        check("ASCII case-insensitivity is unchanged",
+              s.json("progress", "bench press", "--json")[0]["series"], [50.0, 55.0, 60.0])
+
+        r = s.run("progress", "Bench Pres")
+        check("a typo exits non-zero", r.returncode, 1)
+        check("a typo does not blame the archive", "no load data" in r.stderr, False)
+        check("a typo names what was asked for", "'Bench Pres'" in r.stderr, True)
+        check("a typo suggests the closest name", '"Bench Press"' in r.stderr, True)
+        r = s.run("progress", "uberkopfdrucken")
+        check("a missing umlaut is suggested back",
+              '"Überkopfdrücken"' in r.stderr, True)
+        r = s.run("progress", "Zzzyzx")
+        check("nothing close gets no suggestion, but no blame either",
+              ("did you mean" in r.stderr, "no exercise called 'Zzzyzx'" in r.stderr,
+               r.returncode), (False, True, 1))
+        r = s.run("progress", "plank")
+        check("an exercise with no load says so by its own name",
+              ("Plank has no load recorded" in r.stderr, r.returncode), (True, 1))
+        check("--json still gives [] for a miss",
+              s.out("progress", "Bench Pres", "--json"), "[]")
+        check_that("no Traceback on any miss", "Traceback" not in r.stderr, r.stderr)
+
+    with Sandbox() as s:
+        r = s.run("progress", "Bench")
+        check("an empty archive still says there is no load data yet",
+              ("no load data yet" in r.stderr, r.returncode), (True, 1))
+
+
 def main():
     if not CLI.is_file():
         sys.exit(f"cannot find the CLI at {CLI}")
@@ -1231,6 +1301,7 @@ def main():
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url, test_a_malformed_export_is_refused_cleanly,
                  test_skipped_exercises_are_not_sessions,
+                 test_progress_finds_a_name_however_it_is_typed,
                  test_packaging, test_qml_parses):
         test()
 
