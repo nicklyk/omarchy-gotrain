@@ -2184,9 +2184,11 @@ def main(argv=None):
         # shell use, and a traceback here reads like archive damage. Point
         # stdout at /dev/null so the exit-time flush has nowhere to fail, and
         # exit as a SIGPIPE'd tool would (128 + 13). Deliberately not
-        # signal(SIGPIPE, SIG_DFL): being killed outright would skip the
-        # rollback of an import interrupted mid-transaction, whereas the
-        # exception unwinds through `with db:` and rolls it back.
+        # signal(SIGPIPE, SIG_DFL): that kills the process at whichever write
+        # hits the closed pipe and skips every except/finally on the way out
+        # (ingest's rollback, the db.close() below). The exception unwinds
+        # through them like any other error. Note ingest itself prints
+        # nothing; an import's report is written after its commit.
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, sys.stdout.fileno())
         os.close(devnull)
