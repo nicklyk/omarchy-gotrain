@@ -2173,7 +2173,24 @@ def main(argv=None):
     cfg = load_config()
     db = connect()
     try:
-        return args.fn(args, cfg, db)
+        code = args.fn(args, cfg, db)
+        # Flush here, inside the handler below: a pipe is block-buffered, so
+        # the tail of the output is otherwise written at interpreter exit,
+        # where a closed reader turns into "Exception ignored ... BrokenPipe".
+        sys.stdout.flush()
+        return code
+    except BrokenPipeError:
+        # The reader went away early: `gotrain list | head`. That is ordinary
+        # shell use, and a traceback here reads like archive damage. Point
+        # stdout at /dev/null so the exit-time flush has nowhere to fail, and
+        # exit as a SIGPIPE'd tool would (128 + 13). Deliberately not
+        # signal(SIGPIPE, SIG_DFL): being killed outright would skip the
+        # rollback of an import interrupted mid-transaction, whereas the
+        # exception unwinds through `with db:` and rolls it back.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
+        return 141
     finally:
         try:
             db.close()

@@ -1214,6 +1214,50 @@ def test_a_malformed_export_is_refused_cleanly():
               len(list((s.dir / "data" / "gotrain" / "snapshots").iterdir())), 1)
 
 
+def test_a_reader_that_stops_early_gets_no_traceback():
+    print("\na closed pipe on stdout (`gotrain list | head`)")
+
+    def run_into_closed_pipe(s, *args):
+        # Close the read end before the CLI starts, rather than racing a
+        # reader that closes after one line: every write then hits EPIPE,
+        # deterministically, however small the output or fast the machine.
+        r, w = os.pipe()
+        os.close(r)
+        try:
+            return subprocess.run([str(CLI), *args], env=s.env, stdout=w,
+                                  stderr=subprocess.PIPE, text=True)
+        finally:
+            os.close(w)
+
+    with Sandbox() as s:
+        s.run("import", fixture("baseline.json"))
+        for args in (["list"], ["stats"], ["export"], ["export", "--csv"],
+                     ["records"], ["progress"], ["status", "--json"]):
+            r = run_into_closed_pipe(s, *args)
+            label = " ".join(args)
+            check_that(f"{label}: no traceback or 'Exception ignored' on stderr",
+                       "Traceback" not in r.stderr and "Exception" not in r.stderr,
+                       r.stderr)
+            check(f"{label}: exits as a SIGPIPE'd tool would", r.returncode, 141)
+
+        # The normal path is untouched: an open stdout still exits 0.
+        r = s.run("list", "-n", "1")
+        check("list into an open stdout still exits 0 with one line",
+              (r.returncode, len(r.stdout.splitlines())), (0, 1))
+
+    with Sandbox() as s:
+        # An import whose report cannot be written must still leave the
+        # archive whole: the workouts land once, and a re-run is a no-op.
+        r = run_into_closed_pipe(s, "import", fixture("baseline.json"))
+        check_that("import into a closed pipe: no traceback",
+                   "Traceback" not in r.stderr, r.stderr)
+        check("import into a closed pipe still archives the 3 workouts",
+              s.json("panel")["totalWorkouts"], 3)
+        check("and re-importing it changes nothing",
+              "already imported" in s.out("import", fixture("baseline.json")), True)
+        check("still 3", s.json("panel")["totalWorkouts"], 3)
+
+
 def main():
     if not CLI.is_file():
         sys.exit(f"cannot find the CLI at {CLI}")
@@ -1231,6 +1275,7 @@ def main():
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url, test_a_malformed_export_is_refused_cleanly,
                  test_skipped_exercises_are_not_sessions,
+                 test_a_reader_that_stops_early_gets_no_traceback,
                  test_packaging, test_qml_parses):
         test()
 
