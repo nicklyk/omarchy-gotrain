@@ -1256,6 +1256,24 @@ def test_a_bad_file_does_not_lose_the_others():
                 check(f"{name}: and announces no PR again", PR_LINE in again.stdout, False)
 
     with Sandbox() as s:
+        # A file that fails only when SQLite binds it has already inserted a
+        # good workout ("leak") by then. Now that import carries on, the next
+        # file's commit would take that half-done transaction with it unless
+        # ingest rolls it back -- the same trap sync --all is tested for.
+        s.run("import", fixture("baseline.json"))
+        d = json.loads(Path(fixture("pr.json")).read_text())
+        d["history"].insert(0, dict(d["history"][0], id="leak"))
+        d["history"][-1]["plan"] = {"x": 1}
+        half = s.dir / "half.json"
+        half.write_text(json.dumps(d))
+        r = s.run("import", str(half), fixture("pr.json"))
+        check("a file refused mid-merge, then a good one: exits 1", r.returncode, 1)
+        check_that("the good one's PR is still reported", PR_LINE in r.stdout, r.stdout)
+        ids = [h["id"] for h in s.json("export")["history"]]
+        check("nothing from the refused file reaches the archive", "leak" in ids, False)
+        check("the good file's workout does", len(ids), 4)
+
+    with Sandbox() as s:
         r = s.run("import", fixture("baseline.json"))
         check("a single good file still exits 0", r.returncode, 0)
         check("and prints only its summary", r.stdout.strip(),
