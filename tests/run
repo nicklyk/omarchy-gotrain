@@ -1469,6 +1469,73 @@ def test_a_reader_that_stops_early_gets_no_traceback():
         check("still 3", s.json("panel")["totalWorkouts"], 3)
 
 
+def test_a_bad_file_does_not_lose_the_others():
+    print("\nimport with a bad file among good ones")
+    PR_LINE = "PR  Bench Press: 60kg -> 65kg"
+
+    def db_rows(s):
+        import sqlite3
+        db = sqlite3.connect(s.dir / "data" / "gotrain" / "gotrain.db")
+        try:
+            return (sorted(r[0] for r in db.execute("SELECT id FROM workouts")),
+                    db.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0])
+        finally:
+            db.close()
+
+    for label, bad_name in (("unreadable", "bad.json"), ("missing", "nope.json")):
+        for order in ("good first", "bad first"):
+            with Sandbox() as s:
+                bad = s.dir / bad_name
+                if bad_name == "bad.json":
+                    bad.write_text('{"broken')
+                s.run("import", fixture("baseline.json"))
+                files = [fixture("pr.json"), str(bad)]
+                if order == "bad first":
+                    files.reverse()
+                r = s.run("import", *files)
+                name = f"{label} file, {order}"
+                # B-44: dying at the bad file skipped the PR report for the
+                # good one, and a re-import of it is a no-op, so it was lost.
+                check_that(f"{name}: the good file's PR is reported", PR_LINE in r.stdout,
+                           r.stdout)
+                check_that(f"{name}: the good file is imported",
+                           "pr.json: 1 new of 1 workouts" in r.stdout, r.stdout)
+                check_that(f"{name}: the bad file is named on stderr",
+                           bad_name in r.stderr and "Traceback" not in r.stderr, r.stderr)
+                check(f"{name}: still exits 1", r.returncode, 1)
+                check(f"{name}: the archive holds the new workout",
+                      s.json("panel")["totalWorkouts"], 4)
+                before = db_rows(s)
+                again = s.run("import", *files)
+                check(f"{name}: running the pair again changes nothing", db_rows(s), before)
+                check(f"{name}: and announces no PR again", PR_LINE in again.stdout, False)
+
+    with Sandbox() as s:
+        # A file that fails only when SQLite binds it has already inserted a
+        # good workout ("leak") by then. Now that import carries on, the next
+        # file's commit would take that half-done transaction with it unless
+        # ingest rolls it back -- the same trap sync --all is tested for.
+        s.run("import", fixture("baseline.json"))
+        d = json.loads(Path(fixture("pr.json")).read_text())
+        d["history"].insert(0, dict(d["history"][0], id="leak"))
+        d["history"][-1]["plan"] = {"x": 1}
+        half = s.dir / "half.json"
+        half.write_text(json.dumps(d))
+        r = s.run("import", str(half), fixture("pr.json"))
+        check("a file refused mid-merge, then a good one: exits 1", r.returncode, 1)
+        check_that("the good one's PR is still reported", PR_LINE in r.stdout, r.stdout)
+        ids = [h["id"] for h in s.json("export")["history"]]
+        check("nothing from the refused file reaches the archive", "leak" in ids, False)
+        check("the good file's workout does", len(ids), 4)
+
+    with Sandbox() as s:
+        r = s.run("import", fixture("baseline.json"))
+        check("a single good file still exits 0", r.returncode, 0)
+        check("and prints only its summary", r.stdout.strip(),
+              "baseline.json: 3 new of 3 workouts")
+        check("and nothing on stderr", r.stderr, "")
+
+
 def main():
     if not CLI.is_file():
         sys.exit(f"cannot find the CLI at {CLI}")
@@ -1485,6 +1552,7 @@ def main():
                  test_today, test_an_empty_workout_is_not_a_session, test_export_csv,
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url, test_a_malformed_export_is_refused_cleanly,
+                 test_a_bad_file_does_not_lose_the_others,
                  test_skipped_exercises_are_not_sessions,
                  test_partly_done_sets_count_in_stats_and_panel,
                  test_progress_finds_a_name_however_it_is_typed,

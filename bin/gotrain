@@ -1054,19 +1054,36 @@ def after_import(db, cfg, results):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def cmd_import(args, cfg, db):
-    results = []
+    # A bad file must not stop the loop. Each ingest commits on its own, so
+    # dying here used to skip after_import for the files already merged: their
+    # PRs were never printed or notified, and since a re-import of those files
+    # is a no-op, never would be (B-44). Keep going, report what landed, and
+    # still exit 1 so a script sees that something was refused.
+    results, failed = [], []
     for p in args.files:
         path = Path(p).expanduser()
         if not path.is_file():
-            die(f"no such file: {path}")
-        try:
-            state, raw = read_state_bytes(path.read_bytes())
-            res = ingest(db, state, source=f"file:{path}", raw=raw)
-        except (ValueError, json.JSONDecodeError, OSError) as e:
-            die(f"{path.name}: {e}")
-        report_import(res, path.name)
-        results.append(res)
-    after_import(db, cfg, results)
+            failed.append(f"no such file: {path}")
+        else:
+            try:
+                state, raw = read_state_bytes(path.read_bytes())
+                res = ingest(db, state, source=f"file:{path}", raw=raw)
+            except (ValueError, json.JSONDecodeError, OSError) as e:
+                failed.append(f"{path.name}: {e}")
+            else:
+                report_import(res, path.name)
+                results.append(res)
+                continue
+        print(f"{APP}: {failed[-1]}", file=sys.stderr)
+    if results:
+        after_import(db, cfg, results)
+    if failed:
+        # As die() does: without a terminal, stderr is invisible. One
+        # notification for the batch rather than one per file.
+        if not sys.stderr.isatty():
+            more = f" (+{len(failed) - 1} more)" if len(failed) > 1 else ""
+            notify("GoTrain", failed[0].splitlines()[0] + more)
+        return 1
     return 0
 
 
