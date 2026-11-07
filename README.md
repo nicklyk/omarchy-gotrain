@@ -96,6 +96,10 @@ open.
 | `gotrain export [-o FILE]` | Write a merged `tp4_state` to load back into GoTrain |
 | `gotrain export --csv [-o FILE]` | One row per exercise per session, for a spreadsheet |
 
+Every command can be piped into `head` or similar. If the reader stops early,
+`gotrain` exits quietly with status 141, as `cat` would, rather than printing a
+traceback.
+
 ## Progress
 
 GoTrain stores the load you set for each exercise alongside every session, so
@@ -225,8 +229,9 @@ each one was confirmed by breaking the code under it and watching it go red.
 
 Workouts are keyed by GoTrain's own history id and merged, never replaced. An
 export that is malformed is refused as a whole: nothing is imported and no
-snapshot is kept. A
-phone-side reset, a pruned history, a workout deleted in the app, or switching
+snapshot is kept. Given several files, `gotrain import` refuses only the bad
+ones: the rest are imported and their records reported, and it still exits 1
+so a script notices. A phone-side reset, a pruned history, a workout deleted in the app, or switching
 between the home screen app and Safari cannot remove what this machine already
 recorded — which is also
 why `gotrain export` is useful: it writes a merged state you can load back
