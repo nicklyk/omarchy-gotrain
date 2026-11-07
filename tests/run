@@ -710,6 +710,86 @@ def test_today():
           txt.returncode, 0)
 
 
+def test_an_empty_workout_is_not_a_session():
+    # B-38: Finish tapped with nothing done writes a history entry. It must not
+    # reset daysSince, clear the stale nudge, or make `today` exit 0.
+    print("\nan empty workout is not a session")
+    import json as _json
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    utc = ZoneInfo("UTC")
+    now = datetime.now(utc)
+
+    def iso(dt):
+        return dt.astimezone(utc).isoformat().replace("+00:00", "Z")
+
+    def entry(wid, ts, done, sets, legacy=False):
+        e = {"id": wid, "ts": iso(ts), "plan": wid, "planId": "p1",
+             "exercises": [{"id": "e1", "name": "Squat", "muscle": "legs",
+                            "type": "reps", "sets": 3, "reps": "5", "kg": "100",
+                            "setsCompleted": sets, "done": bool(done)}]}
+        if not legacy:
+            e.update(totalExercises=3, doneExercises=done, totalSets=sets)
+        return e
+
+    def archive(*history):
+        s = Sandbox().__enter__()
+        s.env["TZ"] = "Europe/Berlin"
+        d = _json.loads(Path(fixture("baseline.json")).read_text())
+        d["history"] = list(history)
+        path = s.dir / "x.json"
+        path.write_text(_json.dumps(d))
+        s.run("config", "set", "staleDays", "3")
+        s.run("import", str(path))
+        return s
+
+    real = entry("Real", now - timedelta(days=9), 3, 9)
+    s = archive(real, entry("Empty", now, 0, 0))
+    try:
+        st = s.json("status", "--json")
+        check("the empty one is not the last session", st["lastTs"], real["ts"])
+        check("daysSince counts from the real one", st["daysSince"], 9)
+        check("so the bar stays stale", st["stale"], True)
+        check("and it is not counted this week", st["weekCount"], 0)
+        check("but it is still archived", st["totalWorkouts"], 2)
+        check("the panel agrees", s.json("panel")["daysSince"], 9)
+        t = s.run("today")
+        check("today exits 1 on an empty workout", t.returncode, 1)
+        check("and says not yet today", "not yet today -- last was Real" in t.stdout, True)
+        check("list still shows it", "Empty" in s.out("list"), True)
+    finally:
+        s.__exit__()
+
+    s = archive(real, entry("OneSet", now, 0, 1))
+    try:
+        st = s.json("status", "--json")
+        check("one ticked set is a session", (st["daysSince"], st["stale"]), (0, False))
+        check("and today exits 0 for it", s.run("today").returncode, 0)
+    finally:
+        s.__exit__()
+
+    s = archive(entry("Legacy", now, None, None, legacy=True))
+    try:
+        check("an export without the counts still counts",
+              s.json("status", "--json")["daysSince"], 0)
+    finally:
+        s.__exit__()
+
+    s = archive(entry("Empty", now, 0, 0))
+    try:
+        st = s.json("status", "--json")
+        check("only empty workouts: no last session",
+              (st["daysSince"], st["lastTs"], st["stale"], st["weekCount"]),
+              (None, None, False, 0))
+        r = s.run("status")
+        check("status text does not crash", (r.returncode, "none with a set done" in r.stdout),
+              (0, True))
+        check("today exits 1", s.run("today").returncode, 1)
+    finally:
+        s.__exit__()
+
+
 def test_export_csv():
     print("\nexport --csv")
     import csv as _csv, io as _io, json as _json
@@ -1227,7 +1307,7 @@ def main():
                  test_pending_counts_only_new_exports, test_pending_says_what_sync_would_do,
                  test_a_bad_config_value_does_not_blank_the_bar,
                  test_a_broken_config_file_is_not_wiped_and_does_not_blank_the_bar,
-                 test_today, test_export_csv,
+                 test_today, test_an_empty_workout_is_not_a_session, test_export_csv,
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url, test_a_malformed_export_is_refused_cleanly,
                  test_skipped_exercises_are_not_sessions,

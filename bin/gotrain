@@ -864,10 +864,21 @@ def fmt_load(value, unit):
 # reporting
 # ─────────────────────────────────────────────────────────────────────────────
 
+# A workout that counts as a session for the "when did I last train" questions.
+# The phone's Finish writes a history entry even when nothing was ticked -- a
+# stray tap, or an empty start -- and taking that as training silences the
+# stale nudge, which is the only one the plugin may make. So an entry whose
+# counts are both recorded as zero is not a session. A count that is missing
+# (NULL) is not zero: an export from before the field existed still counts,
+# as row_was_done treats legacy rows. list and show still show every entry.
+IS_SESSION = "NOT (done_exercises IS 0 AND total_sets IS 0)"
+
+
 def compute_status(db, cfg) -> dict:
     total = db.execute("SELECT COUNT(*) AS c FROM workouts").fetchone()["c"]
     last = db.execute(
-        "SELECT * FROM workouts WHERE ts IS NOT NULL ORDER BY utc_key(ts) DESC LIMIT 1"
+        f"SELECT * FROM workouts WHERE ts IS NOT NULL AND {IS_SESSION} "
+        "ORDER BY utc_key(ts) DESC LIMIT 1"
     ).fetchone()
 
     out = {
@@ -895,7 +906,8 @@ def compute_status(db, cfg) -> dict:
 
         monday = today - timedelta(days=today.weekday())
         out["weekCount"] = sum(
-            1 for r in db.execute("SELECT ts FROM workouts WHERE ts IS NOT NULL")
+            1 for r in db.execute(
+                f"SELECT ts FROM workouts WHERE ts IS NOT NULL AND {IS_SESSION}")
             if (d := local_date(r["ts"])) and d >= monday
         )
     return out
@@ -1194,10 +1206,11 @@ def cmd_today(args, cfg, db):
     today = datetime.now().astimezone().date()
     rows = [r for r in db.execute(
         "SELECT id, ts, plan, done_exercises, total_exercises, total_sets "
-        "FROM workouts WHERE ts IS NOT NULL ORDER BY utc_key(ts) DESC")
+        f"FROM workouts WHERE ts IS NOT NULL AND {IS_SESSION} ORDER BY utc_key(ts) DESC")
         if local_date(r["ts"]) == today]
     last = db.execute(
-        "SELECT ts, plan FROM workouts WHERE ts IS NOT NULL ORDER BY utc_key(ts) DESC LIMIT 1"
+        f"SELECT ts, plan FROM workouts WHERE ts IS NOT NULL AND {IS_SESSION} "
+        "ORDER BY utc_key(ts) DESC LIMIT 1"
     ).fetchone()
 
     days_since = None
@@ -1238,8 +1251,12 @@ def cmd_status(args, cfg, db):
         print("no workouts yet -- run `gotrain sync` after sending data from the phone")
         return 0
     d = st["daysSince"]
-    when = "today" if d == 0 else "yesterday" if d == 1 else f"{d} days ago"
-    print(f"last workout : {st['lastPlan'] or '?'} ({when})")
+    if d is None:
+        # Workouts are archived, but none had anything done (IS_SESSION).
+        print("last workout : none with a set done yet")
+    else:
+        when = "today" if d == 0 else "yesterday" if d == 1 else f"{d} days ago"
+        print(f"last workout : {st['lastPlan'] or '?'} ({when})")
     print(f"this week    : {st['weekCount']}")
     print(f"total        : {st['totalWorkouts']}")
     if st["lastImport"]:

@@ -59,6 +59,8 @@ BarWidget {
 
   readonly property string tooltip: {
     if (!hasData) return "GoTrain — no workouts imported yet"
+    // Imported, but none had a set done: the CLI reports no daysSince.
+    if (daysSince < 0) return "GoTrain — no workout with a set done yet"
     var when = daysSince === 0 ? "today"
       : daysSince === 1 ? "yesterday"
       : daysSince + " days ago"
