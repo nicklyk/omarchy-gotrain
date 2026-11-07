@@ -111,7 +111,9 @@ the archive already holds a dated series per movement. The **Progress** tab and
 
 Name one exercise (`gotrain progress "Leg Press"`) for its full dated series
 with the step changes marked, or `gotrain records` for the best ever lift per
-exercise and the date you first hit it.
+exercise and the date you first hit it. The name is matched without regard to
+case, umlauts included (`progress überkopfdrücken` finds "Überkopfdrücken"), and
+a name that is not in the archive gets the closest ones suggested back.
 
 Importing a workout that beats a previous best says so in the notification —
 *"Imported 1 workout · PR: Leg Press 60 kg"*. A first import stays quiet rather
