@@ -90,11 +90,16 @@ open.
 | `gotrain config list\|get\|set` | Show or change settings |
 | `gotrain today [--json]` | What was done today; exits 1 if nothing, so `&&` works |
 | `gotrain status [--json]` | Days since last workout, this week, total |
-| `gotrain list [-n N]` | Recent workouts |
-| `gotrain show ID` | One workout, exercise by exercise |
+| `gotrain list [-n N]` | Recent workouts, with how long each took |
+| `gotrain show ID` | One workout, exercise by exercise, and how long it took |
 | `gotrain stats` | Totals, date span, muscle groups, frequent exercises |
 | `gotrain export [-o FILE]` | Write a merged `tp4_state` to load back into GoTrain |
-| `gotrain export --csv [-o FILE]` | One row per exercise per session, for a spreadsheet |
+| `gotrain export --csv [-o FILE]` | One row per exercise per session, for a spreadsheet; the last column, `workout_min`, is the session's length |
+
+A workout's length is the time from its first ticked set to Finish, which the
+phone records since GoTrain v42. Workouts from before then, or whose span is
+negative or a day or more (a wrong clock, or one resumed the next day), show
+no length rather than a wrong one -- the same rule as the app's History.
 
 Every command can be piped into `head` or similar. If the reader stops early,
 `gotrain` exits quietly with status 141, as `cat` would, rather than printing a

@@ -37,6 +37,7 @@ import gzip
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -390,6 +391,33 @@ def to_local(ts: str | None):
     if dt.tzinfo is None:
         dt = dt.astimezone()
     return dt.astimezone()
+
+
+def workout_minutes(w) -> int | None:
+    """Minutes from the first ticked set to Finish, or None.
+
+    Since GoTrain v42 each entry carries startTs beside ts, and the app's
+    History shows the span. It is read from the stored JSON at query time
+    rather than broken out into a column, so no archive needs migrating. The
+    rule is the app's entryMinutes, so the two never disagree: a span that is
+    negative or a day or longer is a wrong clock, not a workout, and an entry
+    from before startTs existed has no duration -- None, never 0.
+    """
+    try:
+        start = json.loads(w["json"] or "{}").get("startTs")
+    except (ValueError, AttributeError):
+        return None
+    a, b = to_local(start) if isinstance(start, str) else None, to_local(w["ts"])
+    if not a or not b:
+        return None
+    # floor(x + 0.5), not round(): Math.round rounds halves up, round() to even.
+    m = math.floor((b - a).total_seconds() / 60 + 0.5)
+    return m if 0 <= m < 24 * 60 else None
+
+
+def fmt_minutes(m: int) -> str:
+    """The app's fmtMinutes: "50 min", "1 h 05 min"."""
+    return f"{m} min" if m < 60 else f"{m // 60} h {m % 60:02d} min"
 
 
 def utc_key(ts: str | None):
@@ -1443,6 +1471,7 @@ def cmd_panel(args, cfg, db):
             "done": w["done_exercises"],
             "total": w["total_exercises"],
             "sets": w["total_sets"],
+            "minutes": workout_minutes(w),
         }
         for w in db.execute(
             "SELECT * FROM workouts ORDER BY (ts IS NULL), utc_key(ts) DESC, first_seen DESC "
@@ -1495,7 +1524,9 @@ def cmd_list(args, cfg, db):
         dt = to_local(w["ts"])
         when = dt.strftime("%Y-%m-%d %H:%M") if dt else (w["raw_date"] or "?")
         done = f"{w['done_exercises']}/{w['total_exercises']}"
-        print(f"{when}  {done:>7}  {w['plan'] or '?'}   [{w['id']}]")
+        mins = workout_minutes(w)
+        took = f" · {fmt_minutes(mins)}" if mins is not None else ""
+        print(f"{when}  {done:>7}  {w['plan'] or '?'}{took}   [{w['id']}]")
     return 0
 
 
@@ -1505,8 +1536,10 @@ def cmd_show(args, cfg, db):
         die(f"no workout with id {args.id}")
     dt = to_local(w["ts"])
     print(f"{w['plan'] or '?'} -- {dt.strftime('%Y-%m-%d %H:%M') if dt else w['raw_date']}")
+    mins = workout_minutes(w)
+    took = f", {fmt_minutes(mins)}" if mins is not None else ""
     print(f"{w['done_exercises']}/{w['total_exercises']} exercises, "
-          f"{w['total_sets']} sets\n")
+          f"{w['total_sets']} sets{took}\n")
     for e in db.execute(
         "SELECT * FROM workout_exercises WHERE workout_id = ? ORDER BY idx", (args.id,)
     ):
@@ -1643,7 +1676,8 @@ def cmd_stats(args, cfg, db):
 
 
 CSV_COLUMNS = ["date", "time", "plan", "exercise", "muscle", "type",
-               "sets", "sets_completed", "reps", "kg", "duration_min", "done"]
+               "sets", "sets_completed", "reps", "kg", "duration_min", "done",
+               "workout_min"]
 
 
 def export_csv(db) -> str:
@@ -1654,17 +1688,22 @@ def export_csv(db) -> str:
     to draw a graph. Oldest first because that is the order a chart reads in.
     The csv module does the quoting, so a note-like value with a comma or a
     quote in it stays one cell.
+
+    workout_min, the whole session's length, repeats on each of its rows and
+    is the last column, so a sheet built on the older export still lines up.
+    It is in whole minutes (the app's rule), and empty where unknown.
     """
     buf = io.StringIO()
     out = csv.writer(buf, lineterminator="\n")
     out.writerow(CSV_COLUMNS)
     rows = db.execute(
         "SELECT w.ts, w.plan, e.name, e.muscle, e.type, e.sets, e.sets_completed, "
-        "e.reps, e.kg, e.duration_min, e.done, e.json "
+        "e.reps, e.kg, e.duration_min, e.done, e.json, w.json AS wjson "
         "FROM workout_exercises e JOIN workouts w ON w.id = e.workout_id "
         "ORDER BY (w.ts IS NULL), utc_key(w.ts), e.idx")
     for r in rows:
         local = to_local(r["ts"])
+        took = workout_minutes({"json": r["wjson"], "ts": r["ts"]})
         # durationSecs is exact where the app recorded it; duration_min is the
         # older free-text form. Prefer the exact one, as minutes.
         extra = json.loads(r["json"] or "{}")
@@ -1679,6 +1718,7 @@ def export_csv(db) -> str:
             r["sets_completed"] if r["sets_completed"] is not None else "",
             r["reps"] or "", r["kg"] or "", duration,
             "yes" if r["done"] else "no",
+            took if took is not None else "",
         ])
     return buf.getvalue()
 
