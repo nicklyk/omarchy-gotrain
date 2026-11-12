@@ -799,7 +799,8 @@ def test_export_csv():
         rows = list(_csv.reader(_io.StringIO(text)))
         check("the header names every column", rows[0],
               ["date", "time", "plan", "exercise", "muscle", "type", "sets",
-               "sets_completed", "reps", "kg", "duration_min", "done"])
+               "sets_completed", "reps", "kg", "duration_min", "done",
+               "workout_min"])
 
         body = rows[1:]
         exported = s.json("export")
@@ -826,7 +827,7 @@ def test_export_csv():
         path.write_text(_json.dumps(d))
         s.run("import", str(path))
         rows = list(_csv.reader(_io.StringIO(s.out("export", "--csv"))))
-        check("every row keeps its column count", {len(r) for r in rows}, {12})
+        check("every row keeps its column count", {len(r) for r in rows}, {13})
         check("a comma and quotes survive in one cell",
               'Push, "heavy" day' in [r[2] for r in rows], True)
 
@@ -1469,6 +1470,76 @@ def test_a_reader_that_stops_early_gets_no_traceback():
         check("still 3", s.json("panel")["totalWorkouts"], 3)
 
 
+def test_workout_duration():
+    print("\nhow long a workout took (B-43)")
+    import csv as _csv, io as _io
+    base = json.loads(Path(fixture("baseline.json")).read_text())
+
+    def with_starts(s, starts):
+        """baseline.json with startTs set per workout id, as GoTrain v42+
+        writes it: toISOString() of the first ticked set."""
+        d = json.loads(json.dumps(base))
+        for h in d["history"]:
+            h["ts"] = h["ts"] + ".000Z"
+            if h["id"] in starts:
+                h["startTs"] = starts[h["id"]]
+        path = s.dir / "starts.json"
+        path.write_text(json.dumps(d))
+        r = s.run("import", str(path))
+        check("the export with startTs imports", r.returncode, 0)
+
+    def csv_minutes(s):
+        rows = list(_csv.reader(_io.StringIO(s.out("export", "--csv"))))
+        check("every CSV row keeps one column count", {len(r) for r in rows}, {13})
+        check("workout_min is the last column, after the old ones",
+              rows[0][-2:], ["done", "workout_min"])
+        return {r[0]: {x[-1] for x in rows[1:] if x[0] == r[0]} for r in rows[1:]}
+
+    with Sandbox() as s:
+        # w3 50 minutes; w2 started after it finished (a wrong clock); w1 more
+        # than a day before Finish (resumed the next day). Only w3 has one.
+        with_starts(s, {"w3": "2026-08-15T17:10:00.000Z",
+                        "w2": "2026-08-08T18:05:00.000Z",
+                        "w1": "2026-07-31T17:00:00.000Z"})
+        lines = s.out("list").splitlines()
+        check_that("list: the 50-minute workout says so",
+                   "50 min" in lines[0] and "[w3]" in lines[0], lines)
+        check_that("list: a span that is negative or over a day shows nothing",
+                   all("min" not in l for l in lines[1:]), lines)
+        check_that("list: the id stays last, so it can still be copied",
+                   lines[0].endswith("[w3]"), lines)
+        shown = s.out("show", "w3")
+        check_that("show: the summary line carries 50 min",
+                   "sets, 50 min" in shown, shown)
+        w1 = s.out("show", "w1").splitlines()
+        check_that("show: none for a workout without a sane span",
+                   w1[1].endswith(" sets"), w1)
+        recent = {w["id"]: w["minutes"] for w in s.json("panel")["recent"]}
+        check("panel: recent carries minutes, null where unknown",
+              recent, {"w3": 50, "w2": None, "w1": None})
+        by_day = csv_minutes(s)
+        check("CSV: 50 on each of w3's rows, empty on the others",
+              by_day, {"2026-08-01": {""}, "2026-08-08": {""}, "2026-08-15": {"50"}})
+
+    with Sandbox() as s:
+        # The app's fmtMinutes for an hour or more, and Math.round's halves up.
+        with_starts(s, {"w3": "2026-08-15T16:54:30.000Z"})
+        check_that("an hour or more reads like the app's History",
+                   "1 h 06 min" in s.out("list").splitlines()[0], s.out("list"))
+        check("a half minute rounds up, as Math.round does",
+              s.json("panel")["recent"][0]["minutes"], 66)
+
+    with Sandbox() as s:
+        # baseline.json as it is: no startTs anywhere, as before v42.
+        s.run("import", fixture("baseline.json"))
+        check_that("an old archive's list shows no duration",
+                   all("min" not in l for l in s.out("list").splitlines()), s.out("list"))
+        check("an old archive's panel has minutes null, not 0",
+              {w["minutes"] for w in s.json("panel")["recent"]}, {None})
+        check("an old archive's CSV leaves the cell empty",
+              set().union(*csv_minutes(s).values()), {""})
+
+
 def test_a_bad_file_does_not_lose_the_others():
     print("\nimport with a bad file among good ones")
     PR_LINE = "PR  Bench Press: 60kg -> 65kg"
@@ -1550,6 +1621,7 @@ def main():
                  test_a_bad_config_value_does_not_blank_the_bar,
                  test_a_broken_config_file_is_not_wiped_and_does_not_blank_the_bar,
                  test_today, test_an_empty_workout_is_not_a_session, test_export_csv,
+                 test_workout_duration,
                  test_export_states_its_schema, test_empty_library_does_not_wipe,
                  test_origin_follows_app_url, test_a_malformed_export_is_refused_cleanly,
                  test_a_bad_file_does_not_lose_the_others,
