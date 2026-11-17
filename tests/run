@@ -1560,6 +1560,15 @@ def test_number_must_be_positive():
               (0, ["2026-08-15 18:00      3/3  Test Plan   [w3]"]))
         check("panel -n 1 returns one recent workout", len(s.json("panel", "-n", "1")["recent"]), 1)
         check("panel -n 2 returns two", len(s.json("panel", "-n", "2")["recent"]), 2)
+        # Past SQLite's 64-bit range the bind used to raise OverflowError.
+        huge = str(2**64)
+        r = s.run("list", "-n", huge)
+        check_that("list -n 2**64 lists everything, no traceback",
+                   r.returncode == 0 and len(r.stdout.splitlines()) == 3
+                   and "Traceback" not in r.stderr, r.stderr)
+        r = s.run("panel", "-n", huge)
+        check_that("panel -n 2**64 returns everything, no traceback",
+                   r.returncode == 0 and len(json.loads(r.stdout)["recent"]) == 3, r.stderr)
 
     with Sandbox() as s:
         # The defaults still apply when -n is not given: 15 for list, 8 for panel.
