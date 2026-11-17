@@ -2187,6 +2187,21 @@ def cmd_pair(args, cfg, db):
 # entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
+def positive_int(text):
+    """argparse type for -n. SQLite's LIMIT reads 0 as "no rows" and a negative
+    number as "no limit", so passing either through made `list -n 0` print
+    "no workouts yet" over a full archive -- a false alarm about the only
+    copy -- and `-n -1` dump everything. Refused here, argparse names the
+    option and exits 2, as it already does for `-n abc`."""
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {text!r}")
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, not {n}")
+    return n
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog=APP, description="Sync GoTrain workout data to this machine.")
@@ -2226,7 +2241,7 @@ def main(argv=None):
     p.set_defaults(fn=cmd_status)
 
     p = sub.add_parser("panel", help="JSON for the bar popup (internal)")
-    p.add_argument("-n", "--number", type=int, default=8)
+    p.add_argument("-n", "--number", type=positive_int, default=8)
     p.set_defaults(fn=cmd_panel)
 
     p = sub.add_parser("progress", help="how the load on each exercise has moved")
@@ -2239,7 +2254,7 @@ def main(argv=None):
     p.set_defaults(fn=cmd_records)
 
     p = sub.add_parser("list", help="recent workouts")
-    p.add_argument("-n", "--number", type=int, default=15)
+    p.add_argument("-n", "--number", type=positive_int, default=15)
     p.set_defaults(fn=cmd_list)
 
     p = sub.add_parser("show", help="one workout in detail")
