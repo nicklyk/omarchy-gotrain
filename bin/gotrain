@@ -832,7 +832,10 @@ def load_series(db, name=None):
         entry["label"] = exercise_label(r["name"])
         day = local_date(r["ts"])
         entry["points"].append((day.isoformat() if day else "?", value))
-    # Distinct keys cannot share a label: a label folds back to its own key.
+    # A label folds back to its own key, so distinct keys get distinct labels --
+    # except "?", which exercise_label() gives a blank name and which a name
+    # typed as "?" also gets. Then the later group hides the earlier one here,
+    # where the exact-name grouping used to merge the two under "?".
     return {entry.pop("label"): entry for entry in groups.values()}
 
 
