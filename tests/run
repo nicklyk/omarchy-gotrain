@@ -1274,6 +1274,77 @@ def test_latest_workout_is_picked_by_instant_not_text():
         check("and the cursor is its instant in UTC", cursor_of(s), "2026-10-05T18:00:00.000Z")
 
 
+def test_stats_dates_are_local_like_list():
+    print("\nstats first/last in local time (B-34)")
+    # 22:30Z and 22:40Z are 00:30 and 00:40 the next day in Berlin. list has
+    # printed the local day since B-6; stats printed the stored UTC text, so
+    # the two commands disagreed by a day for every after-midnight session.
+    import sqlite3 as _sq
+
+    def entry(**kw):
+        e = {"plan": "P", "planId": "p1", "totalExercises": 1, "doneExercises": 1,
+             "totalSets": 3,
+             "exercises": [{"id": "e1", "name": "Bench", "muscle": "chest",
+                            "type": "reps", "sets": 3, "reps": "10", "kg": "60",
+                            "setsCompleted": 3, "done": True}]}
+        e.update(kw)
+        return e
+
+    def archive(s, history, tz="Europe/Berlin"):
+        d = json.loads(Path(fixture("baseline.json")).read_text())
+        d["history"] = history
+        path = s.dir / "span.json"
+        path.write_text(json.dumps(d))
+        s.env["TZ"] = tz
+        return s.run("import", str(path))
+
+    def span(s):
+        lines = [l for l in s.out("stats").splitlines() if l.startswith("first / last")]
+        return lines[0].split(":", 1)[1].strip() if lines else None
+
+    with Sandbox() as s:
+        archive(s, [entry(id="a", ts="2026-10-01T22:30:00.000Z"),
+                    entry(id="b", ts="2026-10-15T22:40:00.000Z")])
+        check("stats: after-midnight workouts get their local day",
+              span(s), "2026-10-02 .. 2026-10-16")
+        days = sorted(l.split()[0] for l in s.out("list").splitlines())
+        check("and list prints the same two days", days, ["2026-10-02", "2026-10-16"])
+
+    with Sandbox() as s:
+        archive(s, [entry(id="a", ts="2026-10-01T10:00:00.000Z"),
+                    entry(id="b", ts="2026-10-15T12:00:00.000Z")])
+        check("a midday workout's date is unchanged", span(s), "2026-10-01 .. 2026-10-15")
+
+    with Sandbox() as s:
+        # West of UTC the error ran the other way: 02:00Z is the evening before.
+        archive(s, [entry(id="a", ts="2026-10-02T02:00:00.000Z"),
+                    entry(id="b", ts="2026-10-16T02:00:00.000Z")], tz="America/New_York")
+        check("west of UTC, an evening workout is not pushed to the next day",
+              span(s), "2026-10-01 .. 2026-10-15")
+
+    with Sandbox() as s:
+        # A legacy entry is stored with its own offset (00:30+02:00); its date
+        # is the one the user typed, whatever the stored text's form.
+        archive(s, [entry(id="old", date="2.10.2026", time="00:30"),
+                    entry(id="new", ts="2026-10-15T22:40:00.000Z")])
+        check("a legacy +02:00 timestamp keeps its own local date",
+              span(s), "2026-10-02 .. 2026-10-16")
+
+    with Sandbox() as s:
+        # Nothing the CLI writes gets here, but a hand-edited archive could:
+        # an unparseable ts falls back to its first ten characters, as before,
+        # rather than taking stats down.
+        archive(s, [entry(id="a", ts="2026-10-15T22:40:00.000Z")])
+        db = _sq.connect(s.dir / "data" / "gotrain" / "gotrain.db")
+        db.execute("UPDATE workouts SET ts = '2026-10-01 garbage'")
+        db.commit()
+        db.close()
+        r = s.run("stats")
+        check("an unparseable ts does not crash stats", (r.returncode, "Traceback" in r.stderr),
+              (0, False))
+        check("and prints its raw date", span(s), "2026-10-01 .. 2026-10-01")
+
+
 # ─────────────────────────────────────────────────────────────────────────
 def test_a_malformed_export_is_refused_cleanly():
     print("\nmalformed exports")
@@ -1546,6 +1617,7 @@ def main():
                  test_sync_all_does_not_let_an_older_export_replace_the_library,
                  test_days_bucket_in_local_time,
                  test_latest_workout_is_picked_by_instant_not_text, test_an_old_cursor_is_sent_as_utc,
+                 test_stats_dates_are_local_like_list,
                  test_pending_counts_only_new_exports, test_pending_says_what_sync_would_do,
                  test_a_bad_config_value_does_not_blank_the_bar,
                  test_a_broken_config_file_is_not_wiped_and_does_not_blank_the_bar,
