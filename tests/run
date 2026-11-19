@@ -1607,6 +1607,59 @@ def test_a_bad_file_does_not_lose_the_others():
         check("and nothing on stderr", r.stderr, "")
 
 
+def test_number_must_be_positive():
+    print("\n-n below 1 is refused (B-40)")
+    # SQLite's LIMIT reads 0 as "no rows" and -1 as "no limit": `list -n 0`
+    # said "no workouts yet" over a full archive, and `-n -1` listed it all.
+    with Sandbox() as s:
+        s.run("import", fixture("baseline.json"))
+        for cmd in ("list", "panel"):
+            for n in ("0", "-1"):
+                for args in ([cmd, "-n", n], [cmd, f"--number={n}"]):
+                    label = " ".join(args)
+                    r = s.run(*args)
+                    check(f"{label}: exits 2, as argparse does for -n abc", r.returncode, 2)
+                    check_that(f"{label}: the error names -n",
+                               "-n/--number" in r.stderr and "at least 1" in r.stderr, r.stderr)
+                    check(f"{label}: prints nothing on stdout", r.stdout, "")
+                    check_that(f"{label}: no traceback", "Traceback" not in r.stderr, r.stderr)
+        r = s.run("list", "-n", "abc")
+        check_that("list -n abc keeps argparse's own message",
+                   r.returncode == 2 and "invalid int value: 'abc'" in r.stderr, r.stderr)
+        r = s.run("list", "-n", "1")
+        check("list -n 1 prints one workout", (r.returncode, r.stdout.splitlines()),
+              (0, ["2026-08-15 18:00      3/3  Test Plan   [w3]"]))
+        check("panel -n 1 returns one recent workout", len(s.json("panel", "-n", "1")["recent"]), 1)
+        check("panel -n 2 returns two", len(s.json("panel", "-n", "2")["recent"]), 2)
+        # Past SQLite's 64-bit range the bind used to raise OverflowError.
+        huge = str(2**64)
+        r = s.run("list", "-n", huge)
+        check_that("list -n 2**64 lists everything, no traceback",
+                   r.returncode == 0 and len(r.stdout.splitlines()) == 3
+                   and "Traceback" not in r.stderr, r.stderr)
+        r = s.run("panel", "-n", huge)
+        check_that("panel -n 2**64 returns everything, no traceback",
+                   r.returncode == 0 and len(json.loads(r.stdout)["recent"]) == 3, r.stderr)
+
+    with Sandbox() as s:
+        # The defaults still apply when -n is not given: 15 for list, 8 for panel.
+        d = json.loads(Path(fixture("baseline.json")).read_text())
+        first = d["history"][0]
+        d["history"] = [dict(first, id=f"n{i}", ts=f"2026-09-{i + 1:02d}T18:00:00")
+                        for i in range(20)]
+        many = s.dir / "many.json"
+        many.write_text(json.dumps(d))
+        s.run("import", str(many))
+        check("list without -n still prints 15 of 20", len(s.out("list").splitlines()), 15)
+        check("panel without -n still returns 8", len(s.json("panel")["recent"]), 8)
+        check("list -n 20 prints all 20", len(s.out("list", "-n", "20").splitlines()), 20)
+
+    with Sandbox() as s:
+        r = s.run("list")
+        check("an empty archive still says so, and exits 0",
+              (r.returncode, r.stdout.strip()), (0, "no workouts yet"))
+
+
 def main():
     if not CLI.is_file():
         sys.exit(f"cannot find the CLI at {CLI}")
@@ -1629,6 +1682,7 @@ def main():
                  test_partly_done_sets_count_in_stats_and_panel,
                  test_progress_finds_a_name_however_it_is_typed,
                  test_a_reader_that_stops_early_gets_no_traceback,
+                 test_number_must_be_positive,
                  test_packaging, test_qml_parses):
         test()
 
