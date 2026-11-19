@@ -1673,7 +1673,13 @@ def cmd_stats(args, cfg, db):
         "(SELECT ts FROM workouts WHERE ts IS NOT NULL ORDER BY utc_key(ts) DESC LIMIT 1) AS b"
     ).fetchone()
     if span["a"]:
-        print(f"first / last      : {span['a'][:10]} .. {span['b'][:10]}")
+        # The local calendar date, as list and today print it. The stored text
+        # is the app's UTC toISOString(), so its first ten characters are the
+        # day before for anything after local midnight east of UTC.
+        def day(ts):
+            d = local_date(ts)
+            return d.isoformat() if d else ts[:10]
+        print(f"first / last      : {day(span['a'])} .. {day(span['b'])}")
     print("\nby muscle group (completed sets):")
     # Summed over every row, as the panel does: ticked sets count whether or
     # not the exercise was finished.
