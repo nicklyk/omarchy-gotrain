@@ -1660,6 +1660,113 @@ def test_number_must_be_positive():
               (r.returncode, r.stdout.strip()), (0, "no workouts yet"))
 
 
+def test_one_exercise_under_two_spellings_is_one_exercise():
+    print("\nprogress, records and stats: one exercise, spelt two ways (B-50)")
+
+    def export(s, fname, wid, ts, exercises):
+        d = json.loads(Path(fixture("baseline.json")).read_text())
+        d["history"] = [{"id": wid, "ts": ts, "plan": "Test Plan", "planId": "p1",
+                         "totalExercises": len(exercises), "doneExercises": len(exercises),
+                         "totalSets": 3 * len(exercises), "exercises": exercises}]
+        path = s.dir / fname
+        path.write_text(json.dumps(d, ensure_ascii=False))
+        return str(path)
+
+    def ex(eid, name, kg, muscle="chest"):
+        return {"id": eid, "name": name, "muscle": muscle, "type": "reps", "sets": 3,
+                "reps": "10", "setsCompleted": 3, "done": True, "kg": kg}
+
+    with Sandbox() as s:
+        s.run("import", fixture("baseline.json"))
+        # The baseline spells it "Bench Press"; a week later the phone says
+        # "Bench press " -- renamed, with a stray trailing space.
+        out = s.out("import", export(s, "w4.json", "w4", "2026-08-22T18:00:00",
+                                     [ex("e1", "Bench press ", "65")]))
+        check("a heavier lift under a new spelling is still a PR",
+              "PR  Bench press: 60kg -> 65kg" in out, True)
+
+        rows = s.json("progress", "--json")
+        bench = [r for r in rows if name_key_like(r["name"]) == "bench press"]
+        check("progress: one Bench row, labelled with the latest spelling, trimmed",
+              [(r["name"], r["series"], r["dates"]) for r in bench],
+              [("Bench press", [50.0, 55.0, 60.0, 65.0],
+                ["2026-08-01", "2026-08-08", "2026-08-15", "2026-08-22"])])
+        check("progress: its change runs from the first spelling's start",
+              (bench[0]["first"], bench[0]["change"], bench[0]["sessions"]), (50.0, 15.0, 4))
+        check("progress: other exercises are unaffected",
+              sorted(r["name"] for r in rows),
+              ["Bench press", "Rowing Machine", "Triceps Pushdown"])
+
+        text = s.out("progress", "bench press").splitlines()
+        check("progress NAME prints the dated series, not the summary table",
+              (text[0], "exercise" in text[0]), ("Bench press  (Chest)", False))
+        check("progress NAME lists all four sessions",
+              sum(1 for line in text if line.strip().startswith("2026-08-")), 4)
+
+        recs = [r for r in s.json("records", "--json")
+                if name_key_like(r["name"]) == "bench press"]
+        check("records: Bench once, at 65kg, set on the day it was lifted",
+              [(r["name"], r["best"], r["date"]) for r in recs],
+              [("Bench press", 65.0, "2026-08-22")])
+        check("records text: one Bench line",
+              sum(1 for line in s.out("records").splitlines() if "ench" in line), 1)
+
+        stats = s.out("stats").split("most frequent exercises:")[1].splitlines()
+        bench_lines = [line.strip() for line in stats if "ench" in line]
+        check("stats: Bench counted once, under its latest spelling",
+              [" ".join(line.split()) for line in bench_lines], ["Bench press 4x"])
+
+        # A third spelling at a load that does not beat 65: no PR, still one row.
+        out = s.out("import", export(s, "w5.json", "w5", "2026-08-29T18:00:00",
+                                     [ex("e1", "BENCH PRESS", "62.5")]))
+        check("a third spelling below the best is no PR", "PR" in out, False)
+        recs = [r for r in s.json("records", "--json")
+                if name_key_like(r["name"]) == "bench press"]
+        check("records: still one Bench, still 65kg, now labelled the newest way",
+              [(r["name"], r["best"]) for r in recs], [("BENCH PRESS", 65.0)])
+        # ... and one that beats it is.
+        out = s.out("import", export(s, "w6.json", "w6", "2026-09-05T18:00:00",
+                                     [ex("e1", "bench press", "70")]))
+        check("a third spelling above the best is a PR against the old best",
+              "PR  bench press: 65kg -> 70kg" in out, True)
+
+    with Sandbox() as s:
+        # More than case and whitespace apart stays apart.
+        s.run("import", fixture("baseline.json"))
+        s.run("import", export(s, "inc.json", "i1", "2026-08-22T18:00:00",
+                               [ex("e1", "Incline Bench Press", "40"),
+                                ex("e2", "Bench-Press", "45")]))
+        names = sorted(r["name"] for r in s.json("progress", "--json"))
+        check("Incline Bench Press and Bench-Press stay separate",
+              names, ["Bench Press", "Bench-Press", "Incline Bench Press",
+                      "Rowing Machine", "Triceps Pushdown"])
+        check("the original Bench series is unchanged",
+              [r["series"] for r in s.json("progress", "--json")
+               if r["name"] == "Bench Press"], [[50.0, 55.0, 60.0]])
+        stats = s.out("stats")
+        check("stats keeps them apart too",
+              ("Bench Press" in stats and "Incline Bench Press" in stats
+               and "Bench-Press" in stats), True)
+
+    with Sandbox() as s:
+        # A decomposed umlaut from another device is the same exercise.
+        import unicodedata
+        s.run("import", export(s, "a.json", "a1", "2026-08-01T18:00:00",
+                               [ex("e1", "Überkopfdrücken", "30", "shoulders")]))
+        s.run("import", export(s, "b.json", "b1", "2026-08-08T18:00:00",
+                               [ex("e1", unicodedata.normalize("NFD", "überkopfdrücken"),
+                                   "32.5", "shoulders")]))
+        rows = s.json("progress", "--json")
+        check("NFC and NFD spellings of one name are one exercise",
+              [(len(rows), rows[0]["series"])], [(1, [30.0, 32.5])])
+
+
+def name_key_like(name):
+    """The CLI's name_key, for picking rows out of its JSON in a test."""
+    import unicodedata
+    return unicodedata.normalize("NFC", str(name or "")).strip().casefold()
+
+
 def main():
     if not CLI.is_file():
         sys.exit(f"cannot find the CLI at {CLI}")
@@ -1681,6 +1788,7 @@ def main():
                  test_skipped_exercises_are_not_sessions,
                  test_partly_done_sets_count_in_stats_and_panel,
                  test_progress_finds_a_name_however_it_is_typed,
+                 test_one_exercise_under_two_spellings_is_one_exercise,
                  test_a_reader_that_stops_early_gets_no_traceback,
                  test_number_must_be_positive,
                  test_packaging, test_qml_parses):
