@@ -47,6 +47,7 @@ import socketserver
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import unicodedata
 import urllib.parse
@@ -1763,12 +1764,61 @@ def export_csv(db) -> str:
     return buf.getvalue()
 
 
+def write_export(name: str, text: str) -> Path:
+    """Write an export to `name` so that a failure cannot cost the old file.
+
+    `-o` is usually pointed at the same backup path every time. A plain
+    write_text truncates that file first, so a write that dies part-way --
+    a full disk -- leaves neither the old backup nor the new one. Writing a
+    temporary file beside it and renaming over the target is atomic on one
+    filesystem: the path holds the old file or the new one, never half.
+
+    A folder is refused rather than given an invented file name inside it:
+    `-o ~/Downloads` is the natural thing to type, but a `gotrain-*.json`
+    dropped into the watch folder would be picked up by the next `sync`.
+    """
+    out = Path(name).expanduser()
+    if out.is_dir():
+        # No example name in the message either: anything suggested here could
+        # match a watch glob if the folder is the watch folder.
+        die(f"{out} is a folder -- give -o a file name, not a folder")
+    # Write through a symlink, as write_text did, rather than replacing the link.
+    real = Path(os.path.realpath(out))
+    if not real.parent.is_dir():
+        die(f"cannot write {out}: the folder {real.parent} does not exist")
+    if real.exists():
+        mode = real.stat().st_mode & 0o7777
+    else:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=real.parent, prefix=f".{real.name}.", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, real)
+        tmp = None
+    except OSError as e:
+        die(f"cannot write {out}: {e.strerror or e}"
+            + ("" if not real.exists() else " -- the existing file is unchanged"))
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return out
+
+
 def cmd_export(args, cfg, db):
     if args.csv:
         text = export_csv(db)
         if args.output:
-            out = Path(args.output).expanduser()
-            out.write_text(text)
+            out = write_export(args.output, text)
             print(f"wrote {out} ({text.count(chr(10)) - 1} rows)")
         else:
             sys.stdout.write(text)
@@ -1778,8 +1828,7 @@ def cmd_export(args, cfg, db):
         die("nothing to export -- no plan library imported yet")
     text = json.dumps(state, indent=2, ensure_ascii=False)
     if args.output:
-        out = Path(args.output).expanduser()
-        out.write_text(text)
+        out = write_export(args.output, text)
         print(f"wrote {out} ({len(state['history'])} workouts)")
     else:
         print(text)
