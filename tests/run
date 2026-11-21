@@ -222,6 +222,80 @@ def test_app_url():
               json.loads(s.config_file.read_text()), {})
 
 
+def test_setting_the_watch_folder_keeps_the_others():
+    print("\nconfig set watchDir keeps hand-added folders")
+
+    def sandbox_with(stored):
+        s = Sandbox().__enter__()
+        # ~ in the stored folders must resolve inside the sandbox, and
+        # config_set refuses a folder that does not exist.
+        s.env["HOME"] = str(s.dir / "home")
+        for d in ("Downloads", "Sync", "Phone"):
+            (s.dir / "home" / d).mkdir(parents=True)
+        if stored is not None:
+            s.config_file.parent.mkdir(parents=True, exist_ok=True)
+            s.config_file.write_text(json.dumps(stored))
+        return s
+
+    two = {"watchDirs": ["~/Downloads", "~/Sync"], "staleDays": 5}
+
+    s = sandbox_with(two)
+    try:
+        listing = s.out("config")
+        check("config mentions the second folder",
+              "~/Downloads (+1 more, edit config.json)" in listing, True)
+        view = s.json("config", "list", "--json")["watchDir"]
+        check("the JSON value is still the first folder only", view["value"], "~/Downloads")
+        check("the JSON names the extra folders", view.get("extra"), ["~/Sync"])
+        check("the panel's label carries the hint",
+              view["label"], "Drop folder (+1 more in config.json)")
+        check("config get watchDir is still the bare first folder",
+              s.out("config", "get", "watchDir"), "~/Downloads")
+
+        check("setting a new first folder succeeds",
+              s.run("config", "set", "watchDir", "~/Phone").returncode, 0)
+        check("only the first folder is replaced, the rest and staleDays kept",
+              json.loads(s.config_file.read_text()),
+              {"watchDirs": ["~/Phone", "~/Sync"], "staleDays": 5})
+        check("the panel still watches both",
+              [Path(d).name for d in s.json("panel")["watchDirs"]],
+              ["Phone", "Sync"])
+
+        # The panel's field shows the first folder and saves it on Enter.
+        s.run("config", "set", "watchDir", "~/Downloads")
+        check("setting the first folder to the default does not empty the file",
+              json.loads(s.config_file.read_text()), two)
+
+        # Moving the second folder to the front does not list it twice.
+        s.run("config", "set", "watchDir", "~/Sync")
+        check("a folder already in the list is not duplicated",
+              json.loads(s.config_file.read_text())["watchDirs"], ["~/Sync"])
+    finally:
+        s.__exit__()
+
+    # One folder, or none, behaves exactly as before.
+    s = sandbox_with({"watchDirs": ["~/Sync"]})
+    try:
+        check("a single folder shows no hint", "more" in s.out("config"), False)
+        check("and its JSON has no extra", "extra" in s.json("config", "list", "--json")["watchDir"], False)
+        s.run("config", "set", "watchDir", "~/Phone")
+        check("a single folder is replaced",
+              json.loads(s.config_file.read_text()), {"watchDirs": ["~/Phone"]})
+        s.run("config", "set", "watchDir", "~/Downloads")
+        check("and setting it to the default still drops the key",
+              json.loads(s.config_file.read_text()), {})
+    finally:
+        s.__exit__()
+
+    s = sandbox_with(None)
+    try:
+        s.run("config", "set", "watchDir", "~/Phone")
+        check("with no file, the folder is stored alone",
+              json.loads(s.config_file.read_text()), {"watchDirs": ["~/Phone"]})
+    finally:
+        s.__exit__()
+
+
 LOAD_CFG = """
 import importlib.util, sys, json
 from importlib.machinery import SourceFileLoader
@@ -1844,6 +1918,7 @@ def main():
 
     for test in (test_import_and_merge, test_progress_numbers, test_personal_records,
                  test_panel_shape, test_config_validation, test_app_url,
+                 test_setting_the_watch_folder_keeps_the_others,
                  test_sync_all_lets_the_newest_export_win,
                  test_sync_all_does_not_let_an_older_export_replace_the_library,
                  test_days_bucket_in_local_time,
