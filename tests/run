@@ -244,6 +244,8 @@ def test_setting_the_watch_folder_keeps_the_others():
         listing = s.out("config")
         check("config mentions the second folder",
               "~/Downloads (+1 more, edit config.json)" in listing, True)
+        check("the hint does not run into the (set) marker",
+              "edit config.json) (set)" in listing, True)
         view = s.json("config", "list", "--json")["watchDir"]
         check("the JSON value is still the first folder only", view["value"], "~/Downloads")
         check("the JSON names the extra folders", view.get("extra"), ["~/Sync"])

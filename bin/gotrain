@@ -1492,7 +1492,9 @@ def cmd_config(args, cfg, db):
             value = str(info["value"])
             if info.get("extra"):
                 value += f" (+{len(info['extra'])} more, edit config.json)"
-            print(f"  {key:<14}{value:<28}({origin})")
+            # 27 + a literal space, not 28: a value that fills the column (the
+            # watch-folder hint always does) would otherwise run into "(set)".
+            print(f"  {key:<14}{value:<27} ({origin})")
         print(f"\n  file: {CONFIG_PATH}"
               f"{'' if CONFIG_PATH.exists() else '  (not created yet)'}")
         return 0
