@@ -1379,14 +1379,27 @@ def config_view(cfg) -> dict:
 
     out = {}
     for key, spec in EDITABLE.items():
+        label = spec["label"]
+        extra = None
         if key == "watchDir":
-            value = (cfg["watchDirs"] or ["~/Downloads"])[0]
+            dirs = cfg["watchDirs"] or ["~/Downloads"]
+            value = dirs[0]
             user_set = "watchDirs" in stored
+            # Only the first folder is editable here, but sync and the overdue
+            # banner watch all of them. Without a hint, a second folder added
+            # by hand in config.json is invisible from the terminal and the
+            # panel, and looks like it is not there at all. The hint rides in
+            # the label rather than the value: the panel's field puts the value
+            # back into `config set` on Enter, and must get a bare folder.
+            extra = dirs[1:]
+            if extra:
+                label = f"{label} (+{len(extra)} more in config.json)"
         else:
             value = cfg[key]
             user_set = key in stored
-        out[key] = {"value": value, "default": not user_set,
-                    "label": spec["label"]}
+        out[key] = {"value": value, "default": not user_set, "label": label}
+        if extra:
+            out[key]["extra"] = extra
         for bound in ("min", "max"):
             if bound in spec:
                 out[key][bound] = spec[bound]
@@ -1443,6 +1456,21 @@ def config_set(key: str, raw: str):
         die(f"not changing {key}: {CONFIG_PATH} cannot be read ({problem}). "
             "Fix or remove it, then try again.")
 
+    if store_key == "watchDirs":
+        # `config set watchDir` and the panel's Drop folder field change the
+        # *first* watch folder. config.json may list more (sync and the overdue
+        # banner read them all), and those were written by hand, so they are
+        # kept: replacing the whole list dropped them without a word, and
+        # setting the first one back to the default then emptied the file.
+        # A list that sanitise_config would reject is replaced as before --
+        # it was not being used anyway.
+        current = stored.get("watchDirs")
+        if (isinstance(current, list) and len(current) > 1
+                and all(isinstance(d, str) for d in current)):
+            first = Path(text).expanduser()
+            store_value = [text] + [d for d in current[1:]
+                                    if Path(d).expanduser() != first]
+
     if store_value == DEFAULT_CONFIG[store_key]:
         stored.pop(store_key, None)          # back to default: drop the override
     else:
@@ -1461,7 +1489,12 @@ def cmd_config(args, cfg, db):
             return 0
         for key, info in view.items():
             origin = "default" if info["default"] else "set"
-            print(f"  {key:<14}{str(info['value']):<28}({origin})")
+            value = str(info["value"])
+            if info.get("extra"):
+                value += f" (+{len(info['extra'])} more, edit config.json)"
+            # 27 + a literal space, not 28: a value that fills the column (the
+            # watch-folder hint always does) would otherwise run into "(set)".
+            print(f"  {key:<14}{value:<27} ({origin})")
         print(f"\n  file: {CONFIG_PATH}"
               f"{'' if CONFIG_PATH.exists() else '  (not created yet)'}")
         return 0
